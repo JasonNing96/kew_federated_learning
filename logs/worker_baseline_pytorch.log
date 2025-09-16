@@ -1,0 +1,47 @@
+[worker_baseline_pytorch] 启动PyTorch简化MNIST Worker
+  MASTER_ADDR: http://127.0.0.1:5000
+  FLQ_MODE: off
+  LOCAL_STEPS: 2
+[worker_baseline_pytorch] PyTorch模型构建完成
+[worker_baseline_pytorch] 模型维度: 101770
+[worker_baseline_pytorch] 量化模式: off
+[worker_baseline_pytorch] 维度不匹配: 期望101770, 实际100000
+[worker_baseline_pytorch] 开始第0轮训练...
+[worker_baseline_pytorch] PyTorch训练完成: loss=355.9077, acc=0.8800
+[worker_baseline_pytorch] 轮次0: loss=355.9077, acc=0.8800, logical_bits=3256640, compression=1.0:1, flq_mode=off, resp={'msg': 'delta size mismatch: 101770 vs 100000', 'status': 'error'}
+[worker_baseline_pytorch] 维度不匹配: 期望101770, 实际100000
+[worker_baseline_pytorch] 开始第0轮训练...
+[worker_baseline_pytorch] PyTorch训练完成: loss=353.4221, acc=0.8800
+[worker_baseline_pytorch] 轮次0: loss=353.4221, acc=0.8800, logical_bits=3256640, compression=1.0:1, flq_mode=off, resp={'msg': 'delta size mismatch: 101770 vs 100000', 'status': 'error'}
+[worker_baseline_pytorch] 维度不匹配: 期望101770, 实际100000
+[worker_baseline_pytorch] 开始第0轮训练...
+[worker_baseline_pytorch] PyTorch训练完成: loss=352.0185, acc=0.8800
+[worker_baseline_pytorch] 轮次0: loss=352.0185, acc=0.8800, logical_bits=3256640, compression=1.0:1, flq_mode=off, resp={'msg': 'delta size mismatch: 101770 vs 100000', 'status': 'error'}
+[worker_baseline_pytorch] 维度不匹配: 期望101770, 实际100000
+[worker_baseline_pytorch] 开始第0轮训练...
+[worker_baseline_pytorch] PyTorch训练完成: loss=307.9240, acc=0.8800
+[worker_baseline_pytorch] 轮次0: loss=307.9240, acc=0.8800, logical_bits=3256640, compression=1.0:1, flq_mode=off, resp={'msg': 'delta size mismatch: 101770 vs 100000', 'status': 'error'}
+[worker_baseline_pytorch] 维度不匹配: 期望101770, 实际100000
+[worker_baseline_pytorch] 开始第0轮训练...
+[worker_baseline_pytorch] PyTorch训练完成: loss=463.3880, acc=0.8800
+[worker_baseline_pytorch] 轮次0: loss=463.3880, acc=0.8800, logical_bits=3256640, compression=1.0:1, flq_mode=off, resp={'msg': 'delta size mismatch: 101770 vs 100000', 'status': 'error'}
+[worker_baseline_pytorch] 维度不匹配: 期望101770, 实际100000
+[worker_baseline_pytorch] 开始第0轮训练...
+[worker_baseline_pytorch] PyTorch训练完成: loss=360.3271, acc=0.8800
+[worker_baseline_pytorch] 轮次0: loss=360.3271, acc=0.8800, logical_bits=3256640, compression=1.0:1, flq_mode=off, resp={'msg': 'delta size mismatch: 101770 vs 100000', 'status': 'error'}
+[worker_baseline_pytorch] 维度不匹配: 期望101770, 实际100000
+[worker_baseline_pytorch] 开始第0轮训练...
+[worker_baseline_pytorch] PyTorch训练完成: loss=350.1967, acc=0.8800
+[worker_baseline_pytorch] 轮次0: loss=350.1967, acc=0.8800, logical_bits=3256640, compression=1.0:1, flq_mode=off, resp={'msg': 'delta size mismatch: 101770 vs 100000', 'status': 'error'}
+[worker_baseline_pytorch] 维度不匹配: 期望101770, 实际100000
+[worker_baseline_pytorch] 开始第0轮训练...
+[worker_baseline_pytorch] PyTorch训练完成: loss=421.8795, acc=0.8800
+[worker_baseline_pytorch] 轮次0: loss=421.8795, acc=0.8800, logical_bits=3256640, compression=1.0:1, flq_mode=off, resp={'msg': 'delta size mismatch: 101770 vs 100000', 'status': 'error'}
+[worker_baseline_pytorch] 维度不匹配: 期望101770, 实际100000
+[worker_baseline_pytorch] 开始第0轮训练...
+[worker_baseline_pytorch] PyTorch训练完成: loss=415.0001, acc=0.8800
+[worker_baseline_pytorch] 轮次0: loss=415.0001, acc=0.8800, logical_bits=3256640, compression=1.0:1, flq_mode=off, resp={'msg': 'delta size mismatch: 101770 vs 100000', 'status': 'error'}
+[worker_baseline_pytorch] 维度不匹配: 期望101770, 实际100000
+[worker_baseline_pytorch] 开始第0轮训练...
+[worker_baseline_pytorch] PyTorch训练完成: loss=319.8321, acc=0.8800
+[worker_baseline_pytorch] 轮次0: loss=319.8321, acc=0.8800, logical_bits=3256640, compression=1.0:1, flq_mode=off, resp={'msg': 'delta size mismatch: 101770 vs 100000', 'status': 'error'}

@@ -1,0 +1,45 @@
+ * Serving Flask app 'master'
+ * Debug mode: off
+[31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:5000
+ * Running on http://172.20.78.30:5000
+[33mPress CTRL+C to quit[0m
+127.0.0.1 - - [16/Sep/2025 12:29:07] "GET /status HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:26] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:27] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:28] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:28] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:29] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:30] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:31] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:31] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:32] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:32] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:34] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:34] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:35] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:35] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:37] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:37] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:59] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:29:59] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:00] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:01] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:02] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:02] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:03] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:04] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:05] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:05] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:06] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:06] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:08] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:08] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:09] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:09] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:11] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:11] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:12] "GET /global HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:12] "POST /update HTTP/1.1" 200 -
+127.0.0.1 - - [16/Sep/2025 12:30:24] "GET /status HTTP/1.1" 200 -
