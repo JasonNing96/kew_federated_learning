@@ -1,0 +1,64 @@
+{
+  "experiment_info": {
+    "name": "test_json_recording",
+    "timestamp": "2025-09-17_10-05-44",
+    "config": {
+      "num_workers": 20,
+      "num_rounds": 1000,
+      "local_epochs": 5,
+      "batch_size": 64,
+      "learning_rate": 0.01,
+      "flq_mode": "sign1"
+    }
+  },
+  "convergence_data": {
+    "rounds": [
+      0
+    ],
+    "global_test_loss": [
+      0.6
+    ],
+    "global_test_accuracy": [
+      0.65
+    ],
+    "average_train_loss": [
+      0.45
+    ],
+    "average_train_accuracy": [
+      0.725
+    ],
+    "communication_bits": [
+      100000
+    ],
+    "compression_ratios": [
+      20.0
+    ]
+  },
+  "communication_data": {
+    "total_upload_bits": 100000,
+    "total_broadcast_bits": 50000,
+    "per_round_bits": [
+      100000
+    ],
+    "quantization_levels": []
+  },
+  "quantization_analysis": {
+    "mode": "sign1",
+    "rmse_values": [
+      0.05
+    ],
+    "approximation_quality": [
+      0.65
+    ],
+    "binary_values": [
+      1.0,
+      1.0
+    ]
+  },
+  "resource_optimization": {
+    "final_accuracy": 0.65,
+    "total_iterations": 1,
+    "total_communication_bits": 100000,
+    "convergence_round": -1
+  }
+}
