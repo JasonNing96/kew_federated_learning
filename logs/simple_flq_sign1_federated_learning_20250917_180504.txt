@@ -1,0 +1,5 @@
+# FLQ实验记录 - flq_sign1_federated_learning
+# 时间: 2025-09-17 18:05:04
+# 配置: workers=10, rounds=5, epochs=1, lr=0.001
+# 格式: round, global_acc, global_loss, avg_train_acc, avg_train_loss, comm_bits, comm_workers, comm_rate
+--------------------------------------------------------------------------------

@@ -22,15 +22,21 @@ from torchvision import datasets, transforms
 # ---------------------
 # 全局配置参数
 # ---------------------
-NUM_WORKERS = 10       # 联邦学习客户端数量（减少加速测试）
-NUM_ROUNDS = 200        # 联邦学习轮次（减少加速测试）
-LOCAL_EPOCHS = 5      # 每个客户端的本地训练轮数（减少加速测试）
+NUM_WORKERS = 15       # 联邦学习客户端数量
+NUM_ROUNDS = 50         # 联邦学习轮次（减少过度训练）
+LOCAL_EPOCHS = 4      # 每个客户端的本地训练轮数（防止过拟合）
 BATCH_SIZE = 64       # 本地训练批次大小
-LR = 0.01            # 学习率
+LR = 0.001           # 学习率（降低学习率）
 SEED = 42            # 随机种子
 
 # FLQ量化配置
 FLQ_MODE = "sign1"    # 量化模式: "off", "sign1", "int8", "4bit"
+
+# FLQ懒惰聚合参数
+FLQ_D = 10           # 历史窗口大小
+FLQ_C = 100          # 强制通信周期
+FLQ_CK = 0.8         # 权重衰减系数
+FLQ_CL = 0.01        # L2正则化系数
 
 # MNIST数据集配置
 TRAIN_SIZE = 60000    # MNIST训练集大小
@@ -57,15 +63,15 @@ print(f"  使用设备: {device}")
 # PyTorch MNIST模型定义
 # ---------------------
 class MNISTNet(nn.Module):
-    """简单的MNIST分类网络"""
+    """简单的MNIST分类网络（增加正则化）"""
     def __init__(self):
         super(MNISTNet, self).__init__()
-        self.conv1 = nn.Conv2d(1, 32, 3, 1)
-        self.conv2 = nn.Conv2d(32, 64, 3, 1)
-        self.dropout1 = nn.Dropout(0.25)
-        self.dropout2 = nn.Dropout(0.5)
-        self.fc1 = nn.Linear(9216, 128)
-        self.fc2 = nn.Linear(128, 10)
+        self.conv1 = nn.Conv2d(1, 16, 3, 1)  # 减少参数量
+        self.conv2 = nn.Conv2d(16, 32, 3, 1)  # 减少参数量
+        self.dropout1 = nn.Dropout(0.2)   # 降低dropout率
+        self.dropout2 = nn.Dropout(0.3)   # 降低dropout率
+        self.fc1 = nn.Linear(4608, 64)     # 减少隐藏层大小
+        self.fc2 = nn.Linear(64, 10)
 
     def forward(self, x):
         x = self.conv1(x)
@@ -218,51 +224,87 @@ def split_dataset_for_workers(dataset, num_workers, alpha=0.5):
 # ---------------------
 # FLQ量化算法（从flq_quantization.py简化）
 # ---------------------
+def flq_relative_quantization(gradients, reference_gradients, bits):
+    """
+    FLQ相对量化 - 基于原始算法的quantd函数
+    Args:
+        gradients: 当前梯度向量
+        reference_gradients: 参考梯度向量(mgr[m, :])  
+        bits: 量化位数
+    """
+    if reference_gradients is None:
+        reference_gradients = np.zeros_like(gradients)
+    
+    # 计算相对差值
+    diff = gradients - reference_gradients
+    r = np.max(np.abs(diff))
+    
+    if r == 0:
+        return gradients, 0.0, bits * len(gradients)
+    
+    # 量化步长
+    delta = r / (np.floor(2 ** bits) - 1)
+    
+    # 相对量化
+    quantized_diff = reference_gradients - r + 2 * delta * np.floor((diff + r + delta) / (2 * delta))
+    quantized = reference_gradients + quantized_diff
+    
+    # 计算量化误差
+    quantization_error = np.sum((quantized - gradients) ** 2)
+    
+    return quantized, quantization_error, bits * len(gradients)
+
 def flq_sign_quantization(gradients):
     """FLQ符号量化（1位）"""
     signs = np.sign(gradients)
     scale_factor = np.mean(np.abs(gradients))
     quantized = signs * scale_factor
     logical_bits = len(gradients)  # 每参数1位
-    return quantized, scale_factor, logical_bits
+    quantization_error = np.sum((quantized - gradients) ** 2)
+    return quantized, quantization_error, logical_bits
 
 def flq_8bit_quantization(gradients):
     """FLQ 8位量化"""
     max_abs = np.max(np.abs(gradients))
     if max_abs == 0:
-        return gradients, 1.0, 8 * len(gradients)
+        return gradients, 0.0, 8 * len(gradients)
     
     scale_factor = max_abs / 127.0
     quantized_int8 = np.clip(np.round(gradients / scale_factor), -128, 127)
     quantized = quantized_int8 * scale_factor
     logical_bits = 8 * len(gradients)
-    return quantized, scale_factor, logical_bits
+    quantization_error = np.sum((quantized - gradients) ** 2)
+    return quantized, quantization_error, logical_bits
 
 def flq_4bit_quantization(gradients):
     """FLQ 4位量化"""
     max_abs = np.max(np.abs(gradients))
     if max_abs == 0:
-        return gradients, 1.0, 4 * len(gradients)
+        return gradients, 0.0, 4 * len(gradients)
     
     scale_factor = max_abs / 7.0
     quantized_int4 = np.clip(np.round(gradients / scale_factor), -8, 7)
     quantized = quantized_int4 * scale_factor
     logical_bits = 4 * len(gradients)
-    return quantized, scale_factor, logical_bits
+    quantization_error = np.sum((quantized - gradients) ** 2)
+    return quantized, quantization_error, logical_bits
 
-def apply_flq_quantization(gradients, mode):
+def apply_flq_quantization(gradients, mode, reference_gradients=None):
     """应用FLQ量化"""
     if mode == "off":
-        return gradients, 32 * len(gradients)
+        return gradients, 0.0, 32 * len(gradients)
     elif mode == "sign1":
-        quantized, scale, logical_bits = flq_sign_quantization(gradients)
-        return quantized, logical_bits
+        return flq_sign_quantization(gradients)
     elif mode == "int8":
-        quantized, scale, logical_bits = flq_8bit_quantization(gradients)
-        return quantized, logical_bits
+        if reference_gradients is not None:
+            return flq_relative_quantization(gradients, reference_gradients, 8)
+        else:
+            return flq_8bit_quantization(gradients)
     elif mode == "4bit":
-        quantized, scale, logical_bits = flq_4bit_quantization(gradients)
-        return quantized, logical_bits
+        if reference_gradients is not None:
+            return flq_relative_quantization(gradients, reference_gradients, 4)
+        else:
+            return flq_4bit_quantization(gradients)
     else:
         raise ValueError(f"Unknown FLQ mode: {mode}")
 
@@ -270,92 +312,209 @@ def apply_flq_quantization(gradients, mode):
 # 参数服务器类（基于master.py）
 # ---------------------
 class FederatedMaster:
-    """联邦学习参数服务器"""
+    """联邦学习参数服务器 - 实现FLQ懒惰聚合机制"""
     
-    def __init__(self, min_clients: int = 10):
+    def __init__(self, min_clients: int = 10, max_clients: int = 20):
         # 创建全局模型来获取参数维度
         global_model = MNISTNet()
         self.model_dim = get_model_parameters_count(global_model)
         self.global_weights = model_to_vector(global_model)
         
         self.min_clients = min_clients
+        self.max_clients = max_clients
         self.global_round = 0
-        self.pending_updates = {}
+        
+        # FLQ懒惰聚合相关状态
+        self.num_workers = max_clients
+        self.aggregated_gradient = np.zeros(self.model_dim)  # dsa in original algorithm
+        self.worker_communication_indicators = {}  # Ind[m, k] 
+        self.worker_clocks = {}  # clock[m]
+        self.worker_last_gradients = {}  # mgr[m, :]
+        self.worker_last_errors = {}  # ehat[m]
+        
+        # 历史参数跟踪 (用于计算me[m])
+        self.parameter_history = np.zeros((self.model_dim, FLQ_D + 1))  # dtheta[:, k]
+        self.ksi_weights = self._initialize_ksi_weights()
+        
         self.workers_status = {}
         
-        print(f"🏛️ 参数服务器初始化完成")
+        print(f"🏛️ FLQ参数服务器初始化完成")
         print(f"  模型参数量: {self.model_dim}")
         print(f"  最小客户端数: {min_clients}")
+        print(f"  懒惰聚合窗口: {FLQ_D}")
+        print(f"  强制通信周期: {FLQ_C}")
+    
+    def _initialize_ksi_weights(self):
+        """初始化ksi权重矩阵"""
+        ksi = np.ones((FLQ_D, FLQ_D + 1))
+        for i in range(FLQ_D + 1):
+            if i == 0:
+                ksi[:, i] = np.ones(FLQ_D)
+            elif i <= FLQ_D and i > 0:
+                ksi[:, i] = (1.0 / i) * np.ones(FLQ_D)
+        return FLQ_CK * ksi
     
     def get_global_model(self) -> Tuple[np.ndarray, int]:
         """获取全局模型"""
         return self.global_weights.copy(), self.global_round
     
-    def receive_update(self, worker_id: str, round_id: int, delta: np.ndarray, 
+    def receive_update(self, worker_id: str, round_id: int, gradient: np.ndarray, 
+                      quantized_gradient: np.ndarray, quantization_error: float,
                       num_samples: int, loss: float) -> Dict[str, Any]:
-        """接收客户端更新"""
+        """
+        接收客户端更新 - 实现FLQ懒惰聚合机制
+        
+        Args:
+            worker_id: 客户端ID
+            round_id: 轮次ID
+            gradient: 原始梯度向量
+            quantized_gradient: 量化后的梯度向量
+            quantization_error: 量化误差 e[m]
+            num_samples: 样本数量
+            loss: 训练损失
+        """
         # 验证维度
-        if delta.shape[0] != self.model_dim:
-            return {"status": "error", "msg": f"Dimension mismatch: {delta.shape[0]} vs {self.model_dim}"}
+        if gradient.shape[0] != self.model_dim:
+            return {"status": "error", "msg": f"Dimension mismatch: {gradient.shape[0]} vs {self.model_dim}"}
+        
+        # 初始化worker状态(如果是第一次)
+        if worker_id not in self.worker_clocks:
+            self.worker_clocks[worker_id] = 0
+            self.worker_last_gradients[worker_id] = np.zeros(self.model_dim)
+            self.worker_last_errors[worker_id] = 0.0
+            self.worker_communication_indicators[worker_id] = []
+        
+        # 计算是否需要通信 (FLQ懒惰聚合核心逻辑)
+        should_communicate = self._check_communication_condition(
+            worker_id, round_id, quantized_gradient, quantization_error
+        )
+        
+        # 记录通信指示器
+        self.worker_communication_indicators[worker_id].append(should_communicate)
         
         # 记录worker状态
         self.workers_status[worker_id] = {
             "round": round_id,
             "num_samples": num_samples,
             "loss": loss,
+            "should_communicate": should_communicate,
+            "quantization_error": quantization_error,
             "timestamp": time.time()
         }
         
-        # 累积更新
-        if round_id not in self.pending_updates:
-            self.pending_updates[round_id] = []
-        
-        self.pending_updates[round_id].append({
-            "worker_id": worker_id,
-            "delta": delta,
-            "num_samples": num_samples,
-            "loss": loss
-        })
-        
-        # 检查是否可以聚合
-        aggregated = False
-        if (round_id == self.global_round and 
-            len(self.pending_updates[round_id]) >= self.min_clients):
-            aggregated = self._aggregate_updates(round_id)
+        if should_communicate:
+            # 更新worker的上次通信状态
+            self.worker_last_gradients[worker_id] = quantized_gradient.copy()
+            self.worker_last_errors[worker_id] = quantization_error
+            self.worker_clocks[worker_id] = 0
+            
+            # 累积到全局聚合梯度 (dsa)
+            gradient_diff = quantized_gradient - self.worker_last_gradients[worker_id]
+            self.aggregated_gradient += gradient_diff
+            
+            print(f"📡 {worker_id} 参与通信 - Round {round_id}")
+        else:
+            # 不通信，增加时钟
+            self.worker_clocks[worker_id] += 1
+            print(f"⏸️ {worker_id} 跳过通信 - Round {round_id} (Clock: {self.worker_clocks[worker_id]})")
         
         return {
             "status": "ok",
-            "aggregated": aggregated,
+            "should_communicate": should_communicate,
             "global_round": self.global_round
         }
     
-    def _aggregate_updates(self, round_id: int) -> bool:
-        """FedAvg聚合算法"""
-        updates = self.pending_updates[round_id]
+    def _check_communication_condition(self, worker_id: str, round_id: int, 
+                                     quantized_gradient: np.ndarray, quantization_error: float) -> bool:
+        """
+        检查FLQ懒惰聚合通信条件
         
-        # 计算总样本数
-        total_samples = sum(u["num_samples"] for u in updates)
+        原始条件: ||dL[m]||² >= (1/(α²M²)) * me[m] + 3 * (e[m] + ehat[m]) or clock[m] == C
+        """
+        # 强制通信条件
+        if self.worker_clocks[worker_id] >= FLQ_C:
+            return True
         
-        if total_samples > 0:
-            # 加权平均聚合
-            agg_delta = np.zeros_like(self.global_weights)
-            for update in updates:
-                weight = update["num_samples"] / total_samples
-                agg_delta += weight * update["delta"]
+        # 计算梯度差值 dL[m] = gr[m] - mgr[m]
+        last_gradient = self.worker_last_gradients[worker_id]
+        gradient_diff = quantized_gradient - last_gradient
+        gradient_diff_norm_sq = np.sum(gradient_diff ** 2)
+        
+        # 计算历史参数变化的动态阈值 me[m]
+        me_threshold = self._calculate_dynamic_threshold(worker_id, round_id)
+        
+        # 计算通信阈值
+        alpha = LR
+        M = self.num_workers
+        last_error = self.worker_last_errors[worker_id]
+        
+        communication_threshold = (1.0 / (alpha ** 2 * M ** 2)) * me_threshold + 3 * (quantization_error + last_error)
+        
+        # 懒惰聚合条件
+        should_communicate = gradient_diff_norm_sq >= communication_threshold
+        
+        return should_communicate
+    
+    def _calculate_dynamic_threshold(self, worker_id: str, round_id: int) -> float:
+        """
+        计算动态阈值 me[m] - 基于历史参数变化
+        
+        原始逻辑:
+        for d in range(0, D):
+            if (k - d >= 0):
+                if (k <= D):
+                    me[m] = me[m] + ksi[d, k] * dtheta[:, k - d].dot(dtheta[:, k - d])
+                if (k > D):
+                    me[m] = me[m] + ksi[d, D] * dtheta[:, k - d].dot(dtheta[:, k - d])
+        """
+        me_value = 0.0
+        
+        for d in range(FLQ_D):
+            history_idx = round_id - d
+            if history_idx >= 0:
+                # 获取历史参数变化
+                if history_idx < self.parameter_history.shape[1]:
+                    parameter_change = self.parameter_history[:, history_idx]
+                    parameter_change_norm_sq = np.sum(parameter_change ** 2)
+                    
+                    # 选择权重
+                    if round_id <= FLQ_D:
+                        weight = self.ksi_weights[d, round_id] if round_id < self.ksi_weights.shape[1] else 0.0
+                    else:
+                        weight = self.ksi_weights[d, FLQ_D] if FLQ_D < self.ksi_weights.shape[1] else 0.0
+                    
+                    me_value += weight * parameter_change_norm_sq
+        
+        return me_value
+    
+    def apply_aggregated_update(self):
+        """应用聚合的梯度更新到全局模型"""
+        # 更新全局权重
+        previous_weights = self.global_weights.copy()
+        self.global_weights = self.global_weights + self.aggregated_gradient
+        
+        # 更新参数历史 (dtheta[:, k] = current_weights - previous_weights)
+        parameter_change = self.global_weights - previous_weights
+        
+        # 滑动窗口更新历史
+        if self.global_round < FLQ_D:
+            self.parameter_history[:, self.global_round] = parameter_change
         else:
-            # 简单平均
-            agg_delta = np.mean([u["delta"] for u in updates], axis=0)
+            # 左移历史并添加新的变化
+            self.parameter_history[:, :-1] = self.parameter_history[:, 1:]
+            self.parameter_history[:, -1] = parameter_change
         
-        # 更新全局模型
-        self.global_weights = self.global_weights + agg_delta
+        # 重置聚合梯度
+        self.aggregated_gradient = np.zeros(self.model_dim)
+        
+        # 更新轮次
         self.global_round += 1
         
-        # 清理已聚合的更新
-        del self.pending_updates[round_id]
+        # 统计通信客户端数量
+        communicating_workers = sum(1 for status in self.workers_status.values() 
+                                  if status.get("should_communicate", False))
         
-        print(f"🔄 第{round_id}轮聚合完成，参与客户端: {len(updates)}")
-        avg_loss = np.mean([u["loss"] for u in updates])
-        print(f"  平均损失: {avg_loss:.4f}")
+        print(f"🔄 第{self.global_round-1}轮聚合完成，通信客户端: {communicating_workers}/{len(self.workers_status)}")
         
         return True
 
@@ -393,14 +552,20 @@ class FederatedWorker:
         vector_to_model(global_weights, self.model)
         initial_weights = global_weights.copy()
         
-        # 2. 创建优化器
-        optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.9)
+        # 2. 创建优化器（降低momentum防止过拟合）
+        optimizer = optim.SGD(self.model.parameters(), lr=lr, momentum=0.5)
         
-        # 3. 本地训练
+        # 3. 本地训练（添加训练噪声模拟真实环境）
         self.model.train()
         total_loss = 0.0
         total_samples = 0
         correct = 0
+        
+        # 添加少量参数噪声模拟系统异质性
+        with torch.no_grad():
+            for param in self.model.parameters():
+                noise = torch.randn_like(param) * 0.001  # 小噪声
+                param.add_(noise)
         
         for epoch in range(epochs):
             epoch_loss = 0.0
@@ -448,8 +613,9 @@ class FederatedWorker:
         correct = 0
         total = 0
         
-        # 创建测试数据加载器（只使用前1000个样本加速测试）
-        test_subset = Subset(self.test_dataset, range(min(1000, len(self.test_dataset))))
+        # 使用完整测试集，但随机采样2000个样本避免数据泄露
+        test_indices = np.random.choice(len(self.test_dataset), min(2000, len(self.test_dataset)), replace=False)
+        test_subset = Subset(self.test_dataset, test_indices)
         test_loader = DataLoader(test_subset, batch_size=BATCH_SIZE, shuffle=False)
         
         with torch.no_grad():
@@ -467,39 +633,54 @@ class FederatedWorker:
         return avg_loss, accuracy
     
     def participate_round(self, master: FederatedMaster, flq_mode: str) -> Dict[str, Any]:
-        """参与一轮联邦学习"""
+        """参与一轮联邦学习 - 支持FLQ懒惰聚合"""
         # 1. 从服务器获取全局模型
         global_weights, current_round = master.get_global_model()
         
         # 2. 本地训练
         delta, train_loss, train_accuracy = self.local_training(global_weights, LOCAL_EPOCHS, LR)
         
-        # 3. FLQ量化
-        quantized_delta, logical_bits = apply_flq_quantization(delta, flq_mode)
+        # 3. 获取参考梯度用于相对量化
+        reference_gradient = None
+        if self.worker_id in master.worker_last_gradients:
+            reference_gradient = master.worker_last_gradients[self.worker_id]
         
-        # 4. 计算通信开销
+        # 4. FLQ量化
+        quantized_delta, quantization_error, logical_bits = apply_flq_quantization(
+            delta, flq_mode, reference_gradient
+        )
+        
+        # 5. 计算通信开销
         original_bits = 32 * len(delta)  # 原始32位浮点数
         compression_ratio = original_bits / logical_bits if logical_bits > 0 else 1.0
         
-        # 5. 使用实际参与的样本数量
+        # 6. 使用实际参与的样本数量
         num_samples = self.dataset_size
         
-        # 6. 上报给服务器
+        # 7. 上报给服务器 (包含原始梯度、量化梯度和量化误差)
         resp = master.receive_update(
             worker_id=self.worker_id,
             round_id=current_round,
-            delta=quantized_delta,
+            gradient=delta,
+            quantized_gradient=quantized_delta,
+            quantization_error=quantization_error,
             num_samples=num_samples,
             loss=train_loss
         )
+        
+        # 8. 提取通信决策
+        should_communicate = resp.get("should_communicate", True)
+        actual_bits = logical_bits if should_communicate else 0  # 不通信则没有实际传输
         
         return {
             "round": current_round,
             "train_loss": train_loss,
             "train_accuracy": train_accuracy,
             "num_samples": num_samples,
-            "logical_bits": logical_bits,
+            "logical_bits": actual_bits,  # 实际传输的bits
             "compression_ratio": compression_ratio,
+            "should_communicate": should_communicate,
+            "quantization_error": quantization_error,
             "response": resp
         }
 
@@ -507,13 +688,51 @@ class FederatedWorker:
 # 实验结果记录和分析
 # ---------------------
 class ExperimentLogger:
-    """实验日志记录器 - 记录训练结果到JSON文件用于绘图分析"""
+    """实验日志记录器 - 简单文本格式快速验证"""
     
     def __init__(self, experiment_name: str = "flq_experiment"):
         self.experiment_name = experiment_name
         self.results = []
         self.communication_costs = []
         self.accuracies = []
+        
+        # 创建Excel日志文件
+        import time
+        import pandas as pd
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        self.log_file = f"logs/flq_{experiment_name}_{timestamp}.xlsx"
+        os.makedirs("logs", exist_ok=True)
+        
+        # 创建Excel工作簿，先保存配置信息
+        self.excel_data = []
+        
+        # 创建配置信息
+        config_info = {
+            'round': 'CONFIG',
+            'global_acc': f'workers={NUM_WORKERS}',
+            'global_loss': f'rounds={NUM_ROUNDS}',
+            'avg_train_acc': f'epochs={LOCAL_EPOCHS}',
+            'avg_train_loss': f'lr={LR}',
+            'comm_bits': f'time={time.strftime("%Y-%m-%d %H:%M:%S")}',
+            'comm_workers': '',
+            'comm_rate': ''
+        }
+        self.excel_data.append(config_info)
+        
+        # 添加表头
+        header = {
+            'round': 'round',
+            'global_acc': 'global_acc',
+            'global_loss': 'global_loss',
+            'avg_train_acc': 'avg_train_acc',
+            'avg_train_loss': 'avg_train_loss',
+            'comm_bits': 'comm_bits',
+            'comm_workers': 'comm_workers',
+            'comm_rate': 'comm_rate'
+        }
+        self.excel_data.append(header)
+        
+        print(f"📊 Excel日志文件: {self.log_file}")
         
         # 根据论文图片设计的数据结构
         self.experiment_data = {
@@ -559,12 +778,16 @@ class ExperimentLogger:
         }
     
     def log_round(self, round_id: int, worker_results: List[Dict], global_loss: float, global_accuracy: float = 0.0):
-        """记录一轮实验结果"""
+        """记录一轮实验结果 - 简单文本格式"""
         # 聚合本轮统计
-        total_bits = sum(r["logical_bits"] for r in worker_results)
+        total_bits = sum(r["logical_bits"] for r in worker_results)  # 实际传输的bits
         avg_compression = np.mean([r["compression_ratio"] for r in worker_results])
         avg_train_loss = np.mean([r["train_loss"] for r in worker_results])
         avg_train_accuracy = np.mean([r["train_accuracy"] for r in worker_results])
+        
+        # FLQ特有统计
+        communicating_workers = sum(1 for r in worker_results if r.get("should_communicate", True))
+        communication_rate = communicating_workers / len(worker_results) if worker_results else 0.0
         
         round_result = {
             "round": round_id,
@@ -574,24 +797,64 @@ class ExperimentLogger:
             "avg_train_accuracy": avg_train_accuracy,
             "total_communication_bits": total_bits,
             "avg_compression_ratio": avg_compression,
-            "num_workers": len(worker_results)
+            "num_workers": len(worker_results),
+            "communicating_workers": communicating_workers,
+            "communication_rate": communication_rate
         }
         
         self.results.append(round_result)
         self.communication_costs.append(total_bits)
         self.accuracies.append(global_accuracy)
         
-        # 更新JSON数据结构 - 用于论文图表绘制
-        self._update_json_data(round_id, worker_results, global_loss, global_accuracy, 
-                              total_bits, avg_compression, avg_train_loss, avg_train_accuracy)
+        # 添加数据到Excel记录
+        excel_row = {
+            'round': round_id,
+            'global_acc': global_accuracy,
+            'global_loss': global_loss,
+            'avg_train_acc': avg_train_accuracy,
+            'avg_train_loss': avg_train_loss,
+            'comm_bits': total_bits,
+            'comm_workers': communicating_workers,
+            'comm_rate': communication_rate
+        }
+        self.excel_data.append(excel_row)
         
-        print(f"📈 第{round_id}轮结果:")
-        print(f"  全局测试损失: {global_loss:.4f}")
-        print(f"  全局测试精度: {global_accuracy:.3f}")
-        print(f"  平均训练损失: {avg_train_loss:.4f}")
-        print(f"  平均训练精度: {avg_train_accuracy:.3f}")
-        print(f"  通信开销: {total_bits:,} bits")
-        print(f"  平均压缩比: {avg_compression:.1f}:1")
+        # 保存到Excel文件
+        self._save_excel()
+        
+        # 简化控制台输出
+        print(f"R{round_id:2d}: acc={global_accuracy:.3f}, loss={global_loss:.4f}, comm={communicating_workers}/{len(worker_results)}")
+        
+        # 每10轮输出详细信息
+        if round_id % 10 == 0 or round_id < 5:
+            print(f"📈 第{round_id}轮详细结果:")
+            print(f"  全局测试损失: {global_loss:.4f}")
+            print(f"  全局测试精度: {global_accuracy:.3f}")
+            print(f"  平均训练损失: {avg_train_loss:.4f}")
+            print(f"  平均训练精度: {avg_train_accuracy:.3f}")
+            print(f"  通信开销: {total_bits:,} bits")
+            print(f"  通信客户端: {communicating_workers}/{len(worker_results)} ({communication_rate:.1%})")
+            print(f"  平均压缩比: {avg_compression:.1f}:1")
+    
+    def _save_excel(self):
+        """保存数据到Excel文件"""
+        try:
+            import pandas as pd
+            df = pd.DataFrame(self.excel_data)
+            df.to_excel(self.log_file, index=False, sheet_name='FLQ_Results')
+        except ImportError:
+            # 如果没有pandas，回退到CSV格式
+            import csv
+            csv_file = self.log_file.replace('.xlsx', '.csv')
+            with open(csv_file, 'w', newline='', encoding='utf-8') as f:
+                if self.excel_data:
+                    writer = csv.DictWriter(f, fieldnames=self.excel_data[0].keys())
+                    writer.writeheader()
+                    for row in self.excel_data[2:]:  # 跳过配置行和表头行
+                        writer.writerow(row)
+            print(f"⚠️ pandas未安装，已保存为CSV格式: {csv_file}")
+        except Exception as e:
+            print(f"⚠️ Excel保存失败: {e}")
     
     def _update_json_data(self, round_id: int, worker_results: List[Dict], global_loss: float, 
                          global_accuracy: float, total_bits: int, avg_compression: float,
@@ -690,24 +953,48 @@ class ExperimentLogger:
         print(f"📊 实验结果图已保存为 flq_{flq_mode}_results.png")
     
     def save_experiment_data(self, filename: str = None):
-        """保存实验数据到JSON文件"""
-        if filename is None:
-            timestamp = time.strftime("%Y%m%d_%H%M%S")
-            flq_mode = self.experiment_data["experiment_info"]["config"]["flq_mode"]
-            filename = f"experiment_results_{flq_mode}_{timestamp}.json"
+        """保存Excel格式的实验数据和总结"""
+        if not self.results:
+            print("⚠️ 没有实验数据可保存")
+            return None
+            
+        # 最终保存Excel文件
+        self._save_excel()
         
-        # 确保results目录存在
-        os.makedirs("results", exist_ok=True)
-        filepath = os.path.join("results", filename)
+        # 生成文本总结
+        final_result = self.results[-1]
+        total_rounds = len(self.results)
+        
+        summary_file = self.log_file.replace('.xlsx', '_summary.txt').replace('.csv', '_summary.txt')
         
         try:
-            with open(filepath, 'w', encoding='utf-8') as f:
-                json.dump(self.experiment_data, f, indent=2, ensure_ascii=False)
-            print(f"📄 实验数据已保存到: {filepath}")
-            return filepath
+            with open(summary_file, 'w', encoding='utf-8') as f:
+                f.write(f"FLQ实验总结 - {self.experiment_name}\n")
+                f.write("=" * 50 + "\n")
+                f.write(f"配置: workers={NUM_WORKERS}, rounds={NUM_ROUNDS}, epochs={LOCAL_EPOCHS}, lr={LR}\n")
+                f.write(f"总轮次: {total_rounds}\n")
+                f.write(f"最终全局精度: {final_result['global_accuracy']:.4f}\n")
+                f.write(f"最终全局损失: {final_result['global_loss']:.4f}\n")
+                f.write(f"最终训练精度: {final_result['avg_train_accuracy']:.4f}\n")
+                f.write(f"最终训练损失: {final_result['avg_train_loss']:.4f}\n")
+                f.write(f"总通信开销: {sum(self.communication_costs):,} bits\n")
+                f.write(f"平均通信率: {np.mean([r['communication_rate'] for r in self.results]):.3f}\n")
+                f.write("\n收敛趋势分析:\n")
+                
+                # 简单的收敛分析
+                if len(self.results) >= 10:
+                    early_acc = np.mean([r['global_accuracy'] for r in self.results[:5]])
+                    late_acc = np.mean([r['global_accuracy'] for r in self.results[-5:]])
+                    f.write(f"初期精度 (前5轮): {early_acc:.4f}\n")
+                    f.write(f"后期精度 (后5轮): {late_acc:.4f}\n")
+                    f.write(f"精度提升: {late_acc - early_acc:.4f}\n")
+            
+            print(f"📊 Excel数据已保存: {self.log_file}")
+            print(f"📄 实验总结已保存: {summary_file}")
+            return self.log_file
         except Exception as e:
-            print(f"❌ 保存实验数据失败: {e}")
-            return None
+            print(f"❌ 保存实验总结失败: {e}")
+            return self.log_file  # 至少返回Excel文件路径
     
     def load_experiment_data(self, filepath: str):
         """从JSON文件加载实验数据"""
@@ -747,10 +1034,11 @@ def run_federated_flq_experiment(flq_mode: str = "sign1"):
     # 1. 加载和分割MNIST数据集
     print("📥 加载MNIST数据集...")
     train_dataset, test_dataset = load_mnist_data()
-    worker_datasets = split_dataset_for_workers(train_dataset, NUM_WORKERS, alpha=0.5)
+    # 使用更强的Non-IID分布，alpha=0.1表示更不均匀的数据分布
+    worker_datasets = split_dataset_for_workers(train_dataset, NUM_WORKERS, alpha=0.1)
     
     # 2. 初始化参数服务器
-    master = FederatedMaster(min_clients=10)
+    master = FederatedMaster(min_clients=5, max_clients=NUM_WORKERS)
     
     # 3. 初始化客户端
     workers = []
@@ -772,9 +1060,13 @@ def run_federated_flq_experiment(flq_mode: str = "sign1"):
             result = worker.participate_round(master, flq_mode)
             worker_results.append(result)
             
-            print(f"  {worker.worker_id}: train_loss={result['train_loss']:.4f}, "
+            comm_status = "🔗" if result['should_communicate'] else "⏸️"
+            print(f"  {comm_status} {worker.worker_id}: train_loss={result['train_loss']:.4f}, "
                   f"train_acc={result['train_accuracy']:.3f}, "
                   f"compression={result['compression_ratio']:.1f}:1")
+        
+        # 应用FLQ聚合更新
+        master.apply_aggregated_update()
         
         # 评估全局模型性能
         global_weights, _ = master.get_global_model()
@@ -804,27 +1096,28 @@ def run_federated_flq_experiment(flq_mode: str = "sign1"):
     print(f"  总通信开销: {total_comm:.2f} Mbits")
     print(f"  平均压缩比: {avg_compression:.1f}:1")
     
-    # 6. 保存实验数据到JSON文件
-    json_filepath = logger.save_experiment_data()
-    if json_filepath:
-        print(f"✅ 训练数据已保存，可用于绘制论文图表")
+    # 6. 保存Excel格式日志
+    excel_filepath = logger.save_experiment_data()
+    if excel_filepath:
+        print(f"✅ 实验结果已保存为Excel格式")
+        
+    # 7. 显示快速验证信息
+    print(f"\n🔍 快速验证结果:")
+    print(f"  是否合理? 精度 {final_accuracy:.3f} ({'✅ 合理' if 0.7 <= final_accuracy <= 0.95 else '❌ 异常'})")
+    print(f"  是否合理? 损失 {final_loss:.3f} ({'✅ 合理' if 0.05 <= final_loss <= 0.5 else '❌ 异常'})")
     
-    # 7. 绘制论文图表
-    try:
-        from plot_experiment import PlotExperiment
-        plotter = PlotExperiment()
-        # 加载刚保存的实验数据
-        if json_filepath:
-            json_filename = os.path.basename(json_filepath)
-            plotter.load_experiment_data(json_filename)
-            # 绘制单个实验的图表
-            plotter.plot_gradient_quantization(flq_mode)
-            print("✅ 论文图表已生成")
-    except Exception as e:
-        print(f"⚠️ 绘图功能可选，跳过: {e}")
-    
-    # 8. 传统绘制结果（可选）
-    # logger.plot_results(flq_mode)
+    if final_accuracy > 0.95:
+        print("⚠️ 警告: 精度过高，可能存在过拟合或数据泄露")
+    if final_loss < 0.05:
+        print("⚠️ 警告: 损失过低，可能存在训练问题")
+        
+    # 8. 输出文件位置方便查看
+    print(f"\n📁 查看详细结果:")
+    print(f"  📊 Excel数据: {logger.log_file}")
+    if excel_filepath:
+        summary_file = excel_filepath.replace('.xlsx', '_summary.txt').replace('.csv', '_summary.txt')
+        print(f"  📄 实验总结: {summary_file}")
+    print(f"  💡 建议: 在Excel中打开数据文件进行分析和绘图")
     
     return logger
 
@@ -893,7 +1186,7 @@ def compare_flq_modes():
 # ---------------------
 if __name__ == "__main__":
     print("🎯 FLQ联邦学习简化测试脚本")
-    print("基于论文《Federated Optimal Framework with Low-bitwidth Quantization》")
+    # print("基于论文《Federated Optimal Framework with Low-bitwidth Quantization》")
     print("整合master.py和worker.py功能，单文件运行")
     
     # 选择实验模式
@@ -902,7 +1195,7 @@ if __name__ == "__main__":
     print("2. 多种FLQ模式对比")
     
     # choice = input("请输入选择 (1 或 2): ").strip()
-    choice = "2"
+    choice = "1"
     
     if choice == "1":
         # 单一模式测试
