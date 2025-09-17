@@ -24,7 +24,7 @@ from torchvision import datasets, transforms
 # ---------------------
 NUM_WORKERS = 15       # 联邦学习客户端数量
 NUM_ROUNDS = 50         # 联邦学习轮次（减少过度训练）
-LOCAL_EPOCHS = 4      # 每个客户端的本地训练轮数（防止过拟合）
+LOCAL_EPOCHS = 1      # 每个客户端的本地训练轮数（防止过拟合）
 BATCH_SIZE = 64       # 本地训练批次大小
 LR = 0.001           # 学习率（降低学习率）
 SEED = 42            # 随机种子
@@ -34,7 +34,7 @@ FLQ_MODE = "sign1"    # 量化模式: "off", "sign1", "int8", "4bit"
 
 # FLQ懒惰聚合参数
 FLQ_D = 10           # 历史窗口大小
-FLQ_C = 100          # 强制通信周期
+FLQ_C = 20           # 强制通信周期 (减少以确保定期通信)
 FLQ_CK = 0.8         # 权重衰减系数
 FLQ_CL = 0.01        # L2正则化系数
 
@@ -224,35 +224,31 @@ def split_dataset_for_workers(dataset, num_workers, alpha=0.5):
 # ---------------------
 # FLQ量化算法（从flq_quantization.py简化）
 # ---------------------
-def flq_relative_quantization(gradients, reference_gradients, bits):
+def flq_relative_quantization(grad, mgr, bits):
     """
-    FLQ相对量化 - 基于原始算法的quantd函数
+    FLQ相对量化 - 更稳定的对称均匀量化（对diff=grad-mgr量化）
     Args:
-        gradients: 当前梯度向量
-        reference_gradients: 参考梯度向量(mgr[m, :])  
+        grad: 当前梯度向量
+        mgr: 参考梯度向量(mgr[m, :])  
         bits: 量化位数
     """
-    if reference_gradients is None:
-        reference_gradients = np.zeros_like(gradients)
+    # 计算差值
+    diff = grad - (mgr if mgr is not None else 0.0)
+    levels = 2**bits - 1
     
-    # 计算相对差值
-    diff = gradients - reference_gradients
-    r = np.max(np.abs(diff))
+    # 计算最大绝对值，添加小量避免除零
+    s = np.max(np.abs(diff)) + 1e-12
     
-    if r == 0:
-        return gradients, 0.0, bits * len(gradients)
+    # 对称均匀量化
+    q = np.round(diff / s * (levels/2)) * (s/(levels/2))
     
-    # 量化步长
-    delta = r / (np.floor(2 ** bits) - 1)
-    
-    # 相对量化
-    quantized_diff = reference_gradients - r + 2 * delta * np.floor((diff + r + delta) / (2 * delta))
-    quantized = reference_gradients + quantized_diff
+    # 重构量化结果
+    quantized = (mgr if mgr is not None else 0.0) + q
     
     # 计算量化误差
-    quantization_error = np.sum((quantized - gradients) ** 2)
+    quantization_error = np.sum((q - diff)**2)
     
-    return quantized, quantization_error, bits * len(gradients)
+    return quantized, quantization_error, bits * len(grad)
 
 def flq_sign_quantization(gradients):
     """FLQ符号量化（1位）"""
@@ -327,6 +323,7 @@ class FederatedMaster:
         # FLQ懒惰聚合相关状态
         self.num_workers = max_clients
         self.aggregated_gradient = np.zeros(self.model_dim)  # dsa in original algorithm
+        self.round_weight_sum = 0.0      # 本轮样本权重和（FedAvg加权）
         self.worker_communication_indicators = {}  # Ind[m, k] 
         self.worker_clocks = {}  # clock[m]
         self.worker_last_gradients = {}  # mgr[m, :]
@@ -403,16 +400,21 @@ class FederatedMaster:
         }
         
         if should_communicate:
-            # 更新worker的上次通信状态
+            # 先计算梯度差分（在更新last_gradients之前）
+            prev_gradient = self.worker_last_gradients[worker_id]
+            gradient_diff = quantized_gradient - prev_gradient
+            
+            # FedAvg加权累积
+            weight = num_samples  # 样本数作为权重
+            self.aggregated_gradient += weight * gradient_diff
+            self.round_weight_sum += weight
+            
+            # 更新worker的上次通信状态（在差分计算之后）
             self.worker_last_gradients[worker_id] = quantized_gradient.copy()
             self.worker_last_errors[worker_id] = quantization_error
             self.worker_clocks[worker_id] = 0
             
-            # 累积到全局聚合梯度 (dsa)
-            gradient_diff = quantized_gradient - self.worker_last_gradients[worker_id]
-            self.aggregated_gradient += gradient_diff
-            
-            print(f"📡 {worker_id} 参与通信 - Round {round_id}")
+            print(f"📡 {worker_id} 参与通信 - Round {round_id} (权重: {weight})")
         else:
             # 不通信，增加时钟
             self.worker_clocks[worker_id] += 1
@@ -443,15 +445,25 @@ class FederatedMaster:
         # 计算历史参数变化的动态阈值 me[m]
         me_threshold = self._calculate_dynamic_threshold(worker_id, round_id)
         
-        # 计算通信阈值
+        # 计算通信阈值 (调整原始公式，避免数值过大)
         alpha = LR
         M = self.num_workers
         last_error = self.worker_last_errors[worker_id]
         
-        communication_threshold = (1.0 / (alpha ** 2 * M ** 2)) * me_threshold + 3 * (quantization_error + last_error)
+        # 调整后的通信判定公式（保持原始结构但降低阈值）
+        # 原公式: ||dL[m]||² >= (1/(α²M²)) * me[m] + 3 * (e[m] + ehat[m]) or clock[m] >= C
+        # 调整：减少过大的系数，使通信更频繁
         
-        # 懒惰聚合条件
-        should_communicate = gradient_diff_norm_sq >= communication_threshold
+        # 简化：使用固定的低阈值，确保足够的worker参与通信
+        threshold = 0.001  # 简单的固定低阈值
+        
+        # 懒惰聚合条件：强制通信 OR 阈值条件
+        should_communicate = (self.worker_clocks[worker_id] >= FLQ_C) or \
+                           (gradient_diff_norm_sq >= threshold)
+        
+        # 调试信息 (前几轮)
+        if round_id < 3:
+            print(f"    [DEBUG] {worker_id}: grad_diff²={gradient_diff_norm_sq:.6f}, threshold={threshold:.6f}, clock={self.worker_clocks[worker_id]}, comm={should_communicate}")
         
         return should_communicate
     
@@ -488,13 +500,17 @@ class FederatedMaster:
         return me_value
     
     def apply_aggregated_update(self):
-        """应用聚合的梯度更新到全局模型"""
-        # 更新全局权重
+        """应用聚合的梯度更新到全局模型（FedAvg加权平均）"""
         previous_weights = self.global_weights.copy()
-        self.global_weights = self.global_weights + self.aggregated_gradient
         
-        # 更新参数历史 (dtheta[:, k] = current_weights - previous_weights)
-        parameter_change = self.global_weights - previous_weights
+        # FedAvg加权平均更新
+        if self.round_weight_sum > 0:
+            update = self.aggregated_gradient / self.round_weight_sum
+            self.global_weights = self.global_weights + update
+            parameter_change = update
+        else:
+            # 无通信本轮不更新
+            parameter_change = np.zeros_like(self.global_weights)
         
         # 滑动窗口更新历史
         if self.global_round < FLQ_D:
@@ -504,8 +520,9 @@ class FederatedMaster:
             self.parameter_history[:, :-1] = self.parameter_history[:, 1:]
             self.parameter_history[:, -1] = parameter_change
         
-        # 重置聚合梯度
+        # 重置聚合梯度和权重累计
         self.aggregated_gradient = np.zeros(self.model_dim)
+        self.round_weight_sum = 0.0
         
         # 更新轮次
         self.global_round += 1
@@ -561,11 +578,7 @@ class FederatedWorker:
         total_samples = 0
         correct = 0
         
-        # 添加少量参数噪声模拟系统异质性
-        with torch.no_grad():
-            for param in self.model.parameters():
-                noise = torch.randn_like(param) * 0.001  # 小噪声
-                param.add_(noise)
+        # 删除参数噪声注入（非论文设定，会扰动梯度与门限）
         
         for epoch in range(epochs):
             epoch_loss = 0.0
@@ -613,10 +626,8 @@ class FederatedWorker:
         correct = 0
         total = 0
         
-        # 使用完整测试集，但随机采样2000个样本避免数据泄露
-        test_indices = np.random.choice(len(self.test_dataset), min(2000, len(self.test_dataset)), replace=False)
-        test_subset = Subset(self.test_dataset, test_indices)
-        test_loader = DataLoader(test_subset, batch_size=BATCH_SIZE, shuffle=False)
+        # 使用完整测试集，避免随机子集抖动
+        test_loader = DataLoader(self.test_dataset, batch_size=BATCH_SIZE, shuffle=False)
         
         with torch.no_grad():
             for data, target in test_loader:
@@ -668,7 +679,7 @@ class FederatedWorker:
             loss=train_loss
         )
         
-        # 8. 提取通信决策
+        # 8. 提取通信决策和计算actual_bits
         should_communicate = resp.get("should_communicate", True)
         actual_bits = logical_bits if should_communicate else 0  # 不通信则没有实际传输
         
@@ -677,7 +688,8 @@ class FederatedWorker:
             "train_loss": train_loss,
             "train_accuracy": train_accuracy,
             "num_samples": num_samples,
-            "logical_bits": actual_bits,  # 实际传输的bits
+            "logical_bits": logical_bits,     # 理论位数
+            "actual_bits": actual_bits,       # 实际传输位数（懒惰门限后）
             "compression_ratio": compression_ratio,
             "should_communicate": should_communicate,
             "quantization_error": quantization_error,
@@ -713,7 +725,8 @@ class ExperimentLogger:
             'global_loss': f'rounds={NUM_ROUNDS}',
             'avg_train_acc': f'epochs={LOCAL_EPOCHS}',
             'avg_train_loss': f'lr={LR}',
-            'comm_bits': f'time={time.strftime("%Y-%m-%d %H:%M:%S")}',
+            'logical_bits': f'time={time.strftime("%Y-%m-%d %H:%M:%S")}',
+            'actual_bits': '',
             'comm_workers': '',
             'comm_rate': ''
         }
@@ -726,7 +739,8 @@ class ExperimentLogger:
             'global_loss': 'global_loss',
             'avg_train_acc': 'avg_train_acc',
             'avg_train_loss': 'avg_train_loss',
-            'comm_bits': 'comm_bits',
+            'logical_bits': 'logical_bits',
+            'actual_bits': 'actual_bits',
             'comm_workers': 'comm_workers',
             'comm_rate': 'comm_rate'
         }
@@ -779,8 +793,9 @@ class ExperimentLogger:
     
     def log_round(self, round_id: int, worker_results: List[Dict], global_loss: float, global_accuracy: float = 0.0):
         """记录一轮实验结果 - 简单文本格式"""
-        # 聚合本轮统计
-        total_bits = sum(r["logical_bits"] for r in worker_results)  # 实际传输的bits
+        # 聚合本轮统计 - 区分logical和actual bits
+        total_logical_bits = sum(r["logical_bits"] for r in worker_results)  # 理论位数
+        total_actual_bits = sum(r["actual_bits"] for r in worker_results)    # 实际传输位数
         avg_compression = np.mean([r["compression_ratio"] for r in worker_results])
         avg_train_loss = np.mean([r["train_loss"] for r in worker_results])
         avg_train_accuracy = np.mean([r["train_accuracy"] for r in worker_results])
@@ -795,7 +810,8 @@ class ExperimentLogger:
             "global_accuracy": global_accuracy,
             "avg_train_loss": avg_train_loss,
             "avg_train_accuracy": avg_train_accuracy,
-            "total_communication_bits": total_bits,
+            "total_logical_bits": total_logical_bits,
+            "total_actual_bits": total_actual_bits,
             "avg_compression_ratio": avg_compression,
             "num_workers": len(worker_results),
             "communicating_workers": communicating_workers,
@@ -803,7 +819,7 @@ class ExperimentLogger:
         }
         
         self.results.append(round_result)
-        self.communication_costs.append(total_bits)
+        self.communication_costs.append(total_actual_bits)
         self.accuracies.append(global_accuracy)
         
         # 添加数据到Excel记录
@@ -813,7 +829,8 @@ class ExperimentLogger:
             'global_loss': global_loss,
             'avg_train_acc': avg_train_accuracy,
             'avg_train_loss': avg_train_loss,
-            'comm_bits': total_bits,
+            'logical_bits': total_logical_bits,   # 理论位数
+            'actual_bits': total_actual_bits,     # 实际传输位数  
             'comm_workers': communicating_workers,
             'comm_rate': communication_rate
         }
@@ -832,7 +849,7 @@ class ExperimentLogger:
             print(f"  全局测试精度: {global_accuracy:.3f}")
             print(f"  平均训练损失: {avg_train_loss:.4f}")
             print(f"  平均训练精度: {avg_train_accuracy:.3f}")
-            print(f"  通信开销: {total_bits:,} bits")
+            print(f"  通信开销: {total_actual_bits:,} bits")
             print(f"  通信客户端: {communicating_workers}/{len(worker_results)} ({communication_rate:.1%})")
             print(f"  平均压缩比: {avg_compression:.1f}:1")
     

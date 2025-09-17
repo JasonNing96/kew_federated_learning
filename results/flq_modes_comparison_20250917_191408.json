@@ -1,0 +1,47 @@
+{
+  "comparison_timestamp": "2025-09-17_19-14-08",
+  "modes_compared": [
+    "off",
+    "sign1",
+    "int8",
+    "4bit"
+  ],
+  "summary": [
+    {
+      "mode": "sign1",
+      "final_accuracy": 0.0,
+      "final_loss": 0.0,
+      "total_communication_bits": 0,
+      "convergence_round": -1,
+      "total_iterations": 0,
+      "avg_compression_ratio": 1.0
+    },
+    {
+      "mode": "sign1",
+      "final_accuracy": 0.0,
+      "final_loss": 0.0,
+      "total_communication_bits": 0,
+      "convergence_round": -1,
+      "total_iterations": 0,
+      "avg_compression_ratio": 1.0
+    },
+    {
+      "mode": "sign1",
+      "final_accuracy": 0.0,
+      "final_loss": 0.0,
+      "total_communication_bits": 0,
+      "convergence_round": -1,
+      "total_iterations": 0,
+      "avg_compression_ratio": 1.0
+    },
+    {
+      "mode": "sign1",
+      "final_accuracy": 0.0,
+      "final_loss": 0.0,
+      "total_communication_bits": 0,
+      "convergence_round": -1,
+      "total_iterations": 0,
+      "avg_compression_ratio": 1.0
+    }
+  ]
+}

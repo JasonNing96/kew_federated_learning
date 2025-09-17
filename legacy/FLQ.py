@@ -1,7 +1,7 @@
 from __future__ import absolute_import, division, print_function
 import tensorflow as tf
-from quantization import StocQ, MSQ_v2, SDQ, BetaQ
-tf.enable_eager_execution()
+# from quantization import StocQ, MSQ_v2, SDQ, BetaQ
+# tf.enable_eager_execution()  # TensorFlow 2.x 默认启用eager execution
 # import tensorflow.compat.v1 as tf
 # tf.compat.v1.disable_eager_execution()
 # tf.enable_eager_execution()
@@ -87,8 +87,8 @@ tic = time.time()
 # alg=0 #cl=0.05;alpha=0.02;Iter=5000
 
 nalg = 1;
-Iter = 5000;
-Iter = 8000;
+# Iter = 5000;
+# Iter = 8000;
 C = 100;
 ck = 0.8;
 # Iter = 4000;
@@ -145,9 +145,9 @@ mnist_model = tf.keras.models.Sequential([
 import tensorflow.keras.backend as K
 from tensorflow.keras.layers import Layer, Conv2D
 
-regularizer = tf.contrib.layers.l2_regularizer(scale=0.9)
+regularizer = tf.keras.regularizers.L2(l2=0.9)
 # regularizer = tf.nn.layers.l2_regularizer(scale=0.9) #mm
-tf.random.set_random_seed(1234)
+tf.random.set_seed(1234)
 
 """
 # v3 ep800 92.85
@@ -182,16 +182,16 @@ def weight_quantize_fn(w, w_bit=8):
 
 def activation_quantize_fn(w_bit):
     def quantize(x):
-        x = tf.fake_quant_with_min_max_vars(x, min=-1.0, max=1.0, num_bits=w_bit)
+        x = tf.quantization.fake_quant_with_min_max_vars(x, min=-1.0, max=1.0, num_bits=w_bit)
         return x
     return quantize
 
 mnist_model = tf.keras.models.Sequential([
-    tf.keras.layers.InputLayer(input_shape=(28, 28)),
+    tf.keras.layers.InputLayer(input_shape=(28, 28, 1)),
     tf.keras.layers.Lambda(lambda x: tf.quantization.fake_quant_with_min_max_vars(x, min=-1.0, max=1.0, num_bits=8)),
     tf.keras.layers.Flatten(),
     # tf.keras.layers.Dense(10, activation=activation_quantize_fn(w_bit=8), kernel_regularizer=weight_quantize_fn),
-    tf.keras.layers.Dense(10, activation=activation_quantize_fn(w_bit=8), kernel_regularizer=weight_quantize_fn)
+    tf.keras.layers.Dense(10, activation=activation_quantize_fn(w_bit=8), kernel_regularizer=regularizer)
 ])
 
 # mnist_model = tf.keras.models.Sequential([
@@ -213,7 +213,7 @@ mnist_model = tf.keras.models.Sequential([
 #     # tf.keras.layers.Dense(10, kernel_regularizer=regularizer)
 #     tf.keras.layers.Dense(10)
 # ])
-mnist_model.compile(optimizer=tf.train.GradientDescentOptimizer(alpha),
+mnist_model.compile(optimizer=tf.keras.optimizers.SGD(learning_rate=alpha),
                     loss='categorical_crossentropy',
                     metrics=['accuracy'])
 
@@ -222,8 +222,8 @@ mnist_model.compile(optimizer=tf.train.GradientDescentOptimizer(alpha),
 for images, labels in Datatr[1].take(1):
     print("Logits: ", mnist_model(images[0:1]).numpy())
 
-# optimizer = tf.train.AdamOptimizer()
-optimizer = tf.train.GradientDescentOptimizer(alpha)
+# optimizer = tf.keras.optimizers.Adam()
+optimizer = tf.keras.optimizers.SGD(learning_rate=alpha)
 
 le = len(mnist_model.trainable_variables)
 nv = 0
@@ -284,7 +284,7 @@ for k in range(0, Iter):   # epochs
         for (batch, (images, labels)) in enumerate(Datatr[m].take(1)):
             with tf.GradientTape() as tape:
                 logits = mnist_model(images, training=True)
-                loss_value = tf.losses.sparse_softmax_cross_entropy(labels, logits)
+                loss_value = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True))
                 for i in range(0, len(mnist_model.trainable_variables)):
                     if i == 0:
                         l2_loss = cl * tf.nn.l2_loss(mnist_model.trainable_variables[i])
@@ -347,8 +347,7 @@ for k in range(0, Iter):   # epochs
     # ccgrads=cgrads
     for i in range(0, len(ccgrads)):
         grnorm[k] = grnorm[k] + tf.nn.l2_loss(ccgrads[i]).numpy()
-    optimizer.apply_gradients(zip(ccgrads, mnist_model.trainable_variables),
-                              global_step=tf.train.get_or_create_global_step())
+    optimizer.apply_gradients(zip(ccgrads, mnist_model.trainable_variables))
 
 acc = mnist_model.evaluate(mnist_ta, mnistl)
 Acc = acc[1]
