@@ -262,7 +262,8 @@ def run_one(mode, args):
             "cum_bits_down": BitsDown,
             "cum_bits_total": BitsUp + BitsDown
         })
-        fn = f"./flq_results_{args.dataset}.xlsx"
+        # fn = f"./flq_results_{args.dataset}.xlsx"
+        fn = f"./{args.out_prefix}_{args.dataset}_{mode}.xlsx"
         with pd.ExcelWriter(fn) as xw:
             df_curve.to_excel(xw, sheet_name=f"curve_{mode}", index=False)
             # Fig.3 原始二值序列
@@ -336,6 +337,8 @@ def main():
     ap.add_argument("--batch", type=int, default=128)
     ap.add_argument("--eval_every", type=int, default=10)
     ap.add_argument("--down_laq8", type=int, default=32, help="LAQ下行位宽，默认32以匹配论文Table口径")
+    ap.add_argument("--out_prefix", type=str, default="results",
+                help="Excel 前缀，输出为 <prefix>_<dataset>_<mode>.xlsx")
     args = ap.parse_args()
 
     tic = time.time()
