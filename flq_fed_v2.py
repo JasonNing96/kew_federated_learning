@@ -294,7 +294,7 @@ def run_one(mode, args):
         if args.lr_min < args.lr:
             t = (k+1)/float(args.iters)
             lr_new = args.lr_min + 0.5*(args.lr - args.lr_min)*(1+np.cos(np.pi*t))
-            optimizer.learning_rate.assign(lr_new)
+            optimizer.learning_rate = lr_new
 
     # 导出 Excel
     if pd is not None:
