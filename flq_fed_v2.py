@@ -39,13 +39,31 @@ def quantd(vec, ref, b):
     q = ref - r + 2 * delta * np.floor((diff + r + delta) / (2 * delta))
     return q.astype(np.float32)
 
-def bin_relative_quant(gvec, ref):
-    """Relative binary quantization with alpha = mean|diff|."""
-    diff = gvec - ref
-    alpha = np.mean(np.abs(diff)).astype(np.float32)
-    vec_q = ref + alpha * np.sign(diff).astype(np.float32)
-    qerr  = np.sum((vec_q - gvec)**2).astype(np.float32)
-    return vec_q, qerr
+# def bin_relative_quant(gvec, ref):
+#     """Relative binary quantization with alpha = mean|diff|."""
+#     diff = gvec - ref
+#     alpha = np.mean(np.abs(diff)).astype(np.float32)
+#     vec_q = ref + alpha * np.sign(diff).astype(np.float32)
+#     qerr  = np.sum((vec_q - gvec)**2).astype(np.float32)
+#     return vec_q, qerr
+
+# def bin_relative_quant(g_eff, ref, bin_scale=0.25):
+#     # 用 g_eff 的幅值定标，避免参考向量差分过大
+#     alpha = (bin_scale * np.mean(np.abs(g_eff))).astype(np.float32)
+#     vec_q = ref + alpha * np.sign(g_eff - ref).astype(np.float32)
+#     qerr  = np.sum((vec_q - g_eff)**2).astype(np.float32)
+#     return vec_q, qerr, alpha
+
+def bin_relative_quant(g_eff, ref, bin_scale=0.25):
+    # 相对二值：用当前与参考的差分幅度来定标
+    diff = g_eff - ref
+    alpha = (bin_scale * np.mean(np.abs(diff))).astype(np.float32)
+    sgn = np.sign(diff).astype(np.float32)
+    sgn[sgn == 0.0] = 1.0  # 防止0通道失活
+    vec_q = ref + alpha * sgn
+    qerr  = np.sum((vec_q - g_eff)**2).astype(np.float32)
+    return vec_q, qerr, float(alpha)
+
 
 def laq_quantize_stochastic(g, k=8):
     """LAQ: symmetric k-bit with stochastic rounding (unbiased)."""
@@ -122,8 +140,16 @@ def build_model(l2=0.0005, lr=0.02, model_kind="cnn"):
 
 # ---------------- one run ----------------
 def run_one(mode, args):
+    import random, numpy as np, tensorflow as tf
+    try:
+        import pandas as pd
+    except Exception:
+        pd = None
+
     # seeds
-    np.random.seed(args.seed); random.seed(args.seed); tf.random.set_seed(args.seed)
+    np.random.seed(getattr(args, "seed", 42))
+    random.seed(getattr(args, "seed", 42))
+    tf.random.set_seed(getattr(args, "seed", 42))
 
     (xtr, ytr), (xte, yte) = load_dataset(args.dataset)
     if args.partition == "iid":
@@ -138,6 +164,11 @@ def run_one(mode, args):
 
     nv = sum(int(np.prod(v.shape)) for v in model.trainable_variables)
     M, D, C, alpha = args.M, args.D, args.C, args.lr
+    warmup    = getattr(args, "warmup", 50)
+    thr_scale = getattr(args, "thr_scale", 0.5)
+    ef_cap    = getattr(args, "ef_cap", 2.0)
+    bin_scale = getattr(args, "bin_scale", 0.25)
+    ema_beta  = getattr(args, "ema_beta", 0.2)   # 服务器端 EMA（仅 bin 用）
 
     # 懒惰缓存
     clock = np.zeros(M, dtype=np.int32)
@@ -145,10 +176,11 @@ def run_one(mode, args):
     ehat = np.zeros(M, dtype=np.float32)
     theta = np.zeros(nv, dtype=np.float32)
     dtheta_hist = np.zeros((nv, D), dtype=np.float32)
-    mgr = np.zeros((M, nv), dtype=np.float32)          # 每客户端的“已上报参考”
-    dL = np.zeros((M, nv), dtype=np.float32)            # 本轮触发的参考增量
-    ef_residual = np.zeros((M, nv), dtype=np.float32)   # 误差补偿
-    g_hat = np.zeros(nv, dtype=np.float32)              # 服务器端全局量化梯度估计（关键）
+    mgr = np.zeros((M, nv), dtype=np.float32)          # 每客户端“已上报参考”
+    dL = np.zeros((M, nv), dtype=np.float32)           # 本轮触发增量
+    ef_residual = np.zeros((M, nv), dtype=np.float32)  # 误差补偿
+    g_hat = np.zeros(nv, dtype=np.float32)             # 服务器端量化梯度估计
+    alpha_ema = np.zeros(M, dtype=np.float32)          # 每客户端 α 的 EMA（仅 bin 用）
 
     Loss = np.zeros(args.iters, dtype=np.float32)
     CommUp = np.zeros(args.iters, dtype=np.float64)
@@ -185,10 +217,12 @@ def run_one(mode, args):
                 if acc_grad is None:
                     acc_grad = [g.numpy() for g in grads]
                 else:
-                    for i, g in enumerate(grads): acc_grad[i] += g.numpy()
+                    for i, g in enumerate(grads):
+                        acc_grad[i] += g.numpy()
             grads = [tf.convert_to_tensor(g/float(args.local_steps)) for g in acc_grad]
             gvec = gradtovec(grads)
 
+            # 采样用于图
             if m == 0:
                 bin_series.append(1 if gvec[0] >= 0 else 0)
             if k % max(1, args.eval_every) == 0 and len(grad_sample_pool) < 2000:
@@ -199,34 +233,66 @@ def run_one(mode, args):
             me_m = float(np.sum((dtheta_hist ** 2).sum(axis=0) * weights))
 
             if mode == "flq_bin":
+                # 误差补偿 + 残差裁剪
                 g_eff = gvec + ef_residual[m]
-                vec_q, e_m = bin_relative_quant(g_eff, mgr[m])
-                e[m] = float(e_m)
+                g2 = np.linalg.norm(gvec) + 1e-12
+                r2 = np.linalg.norm(ef_residual[m])
+                cap = ef_cap * g2
+                if r2 > cap:
+                    ef_residual[m] *= (cap / (r2 + 1e-12))
+                    g_eff = gvec + ef_residual[m]
+
+                # ——二值相对量化：基于“创新量”定标；随机 tie-break；α 做 EMA——
+                diff = g_eff - mgr[m]
+                sgn = np.sign(diff).astype(np.float32)
+                if np.any(sgn == 0):
+                    z = (np.random.rand(*sgn.shape) < 0.5).astype(np.float32)
+                    sgn = np.where(sgn == 0, 2*z - 1.0, sgn)
+                alpha_raw = np.mean(np.abs(diff)).astype(np.float32)   # 用创新量定标
+                a_new = (bin_scale * alpha_raw).astype(np.float32)
+                alpha_m = 0.9 * alpha_ema[m] + 0.1 * a_new             # EMA
+                alpha_ema[m] = alpha_m
+                alpha_bin = float(alpha_m)
+                vec_q = mgr[m] + alpha_bin * sgn
+
+                # 量化误差与创新
+                e[m] = float(np.sum((vec_q - g_eff) ** 2))
                 dL[m] = vec_q - mgr[m]
-                th = (me_m / (alpha * alpha * M * M)) + 3.0 * (e[m] + ehat[m])
-                force = (k < args.warmup) or (clock[m] >= C)
-                if force or (float(dL[m] @ dL[m]) >= args.thr_scale * th):
+
+                # ——触发判定：仅保留超时/暖启动；用 alpha_bin 且按维度归一化——
+                nv_f = float(nv)
+                dL_en = float(dL[m] @ dL[m]) / nv_f
+                e_n   = e[m] / nv_f
+                eh_n  = ehat[m] / nv_f
+                me_term = me_m / ((alpha_bin * alpha_bin + 1e-12) * M * M * nv_f)
+                th = me_term + 3.0 * (e_n + eh_n)
+
+                time_force = (k < warmup) or (clock[m] >= C)
+                if time_force or (dL_en >= thr_scale * th):
                     sel_mask[m] = True
-                    mgr[m] = vec_q; ehat[m] = e[m]; clock[m] = 0
-                    ef_residual[m] = g_eff - vec_q
+                    mgr[m] = vec_q
+                    ehat[m] = e[m]
+                    clock[m] = 0
+                    ef_residual[m] = g_eff - vec_q  # EF 更新
                 else:
-                    clock[m] += 1
+                    clock[m] = min(clock[m] + 1, C)
                     ef_residual[m] = g_eff
 
             elif mode == "flq_lowbit":
+                # 低比特相对量化 + 懒惰（保持原逻辑）
                 g_eff = gvec + ef_residual[m]
-                vec_q = quantd(g_eff, mgr[m], b=args.b_up)   # 典型 8-bit
+                vec_q = quantd(g_eff, mgr[m], b=args.b_up)
                 diff = vec_q - g_eff
                 e[m] = float(diff @ diff)
                 dL[m] = vec_q - mgr[m]
                 th = (me_m / (alpha * alpha * M * M)) + 3.0 * (e[m] + ehat[m])
-                force = (k < args.warmup) or (clock[m] >= C)
-                if force or (float(dL[m] @ dL[m]) >= args.thr_scale * th):
+                force = (k < warmup) or (clock[m] >= C)
+                if force or (float(dL[m] @ dL[m]) >= thr_scale * th):
                     sel_mask[m] = True
                     mgr[m] = vec_q; ehat[m] = e[m]; clock[m] = 0
                     ef_residual[m] = g_eff - vec_q
                 else:
-                    clock[m] += 1
+                    clock[m] = min(clock[m] + 1, C)
                     ef_residual[m] = g_eff
 
             elif mode == "laq8":
@@ -237,27 +303,43 @@ def run_one(mode, args):
                 dL[m] = gvec
                 sel_mask[m] = True
 
-        # ——聚合与更新（关键修正）——
+        # ——聚合与更新——
         sel_cnt = float(sel_mask.sum())
 
-        if mode in ["flq_bin", "flq_lowbit"]:
-            # 仅把触发客户端的参考变动量累计到全局估计；无人触发则保持上轮估计
+        if mode == "flq_bin":
+            # 仅在有人触发时推进；用“参考向量均值”的 EMA 平滑
             if sel_cnt > 0:
-                g_hat += dL[sel_mask].sum(axis=0) / M    # 等价：g_hat = mean_m(mgr[m])
-            ccgrads = vectograd(g_hat, grads)
+                target = mgr.mean(axis=0)
+                g_hat = (1.0 - ema_beta) * g_hat + ema_beta * target
+                ccgrads = vectograd(g_hat, grads)
+                if args.clip_global > 0:
+                    gnorm = np.sqrt(sum((g**2).sum() for g in ccgrads))
+                    if gnorm > args.clip_global:
+                        scale = args.clip_global / (gnorm + 1e-12)
+                        ccgrads = [g * scale for g in ccgrads]
+                optimizer.apply_gradients(zip(ccgrads, model.trainable_variables))
+            # 无触发：不推进
+
+        elif mode == "flq_lowbit":
+            if sel_cnt > 0:
+                target = mgr.mean(axis=0)
+                ccgrads = vectograd(target, grads)
+                if args.clip_global > 0:
+                    gnorm = np.sqrt(sum((g**2).sum() for g in ccgrads))
+                    if gnorm > args.clip_global:
+                        scale = args.clip_global / (gnorm + 1e-12)
+                        ccgrads = [g * scale for g in ccgrads]
+                optimizer.apply_gradients(zip(ccgrads, model.trainable_variables))
         else:
-            # QGD/LAQ8：用当轮量化后的梯度均值
+            # QGD/LAQ8：当轮均值
             g_hat = dL.mean(axis=0)
             ccgrads = vectograd(g_hat, grads)
-
-        # 可选全局裁剪
-        if args.clip_global > 0:
-            gnorm = np.sqrt(sum((g**2).sum() for g in ccgrads))
-            if gnorm > args.clip_global:
-                scale = args.clip_global / (gnorm + 1e-12)
-                ccgrads = [g * scale for g in ccgrads]
-
-        optimizer.apply_gradients(zip(ccgrads, model.trainable_variables))
+            if args.clip_global > 0:
+                gnorm = np.sqrt(sum((g**2).sum() for g in ccgrads))
+                if gnorm > args.clip_global:
+                    scale = args.clip_global / (gnorm + 1e-12)
+                    ccgrads = [g * scale for g in ccgrads]
+            optimizer.apply_gradients(zip(ccgrads, model.trainable_variables))
 
         # 下/上行比特统计
         if mode in ["flq_bin", "flq_lowbit"]:
@@ -294,7 +376,10 @@ def run_one(mode, args):
         if args.lr_min < args.lr:
             t = (k+1)/float(args.iters)
             lr_new = args.lr_min + 0.5*(args.lr - args.lr_min)*(1+np.cos(np.pi*t))
-            optimizer.learning_rate = lr_new
+            try:
+                tf.keras.backend.set_value(optimizer.learning_rate, lr_new)
+            except Exception:
+                optimizer.learning_rate = lr_new
 
     # 导出 Excel
     if pd is not None:
@@ -344,6 +429,9 @@ def main():
     ap.add_argument("--model", choices=["linear","cnn"], default="cnn")
     ap.add_argument("--out_prefix", type=str, default="results")
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--bin_scale", type=float, default=0.25, help="alpha 缩放，二值步长降温")
+    ap.add_argument("--ef_cap", type=float, default=2.0, help="EF 残差相对范数上限系数")
+
     args = ap.parse_args()
 
     tic = time.time()

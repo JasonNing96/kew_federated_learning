@@ -1,0 +1,82 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "FLQ v1 - MNIST IID",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/flq_fed_v1.py",
+            "args": [
+                "--dataset", "mnist",
+                "--M", "10",
+                "--iters", "800",
+                "--b", "1",
+                "--lr", "0.002",
+                "--cl", "0.01",
+                "--C", "100",
+                "--D", "10",
+                "--ck", "0.8",
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "FLQ v1 - MNIST Non-IID",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/flq_fed_v1.py",
+            "args": [
+                "--dataset",
+                "mnist",
+                "--M",
+                "10",
+                "--iters",
+                "800",
+                "--b",
+                "1",
+                "--lr",
+                "0.02",
+                "--cl",
+                "0.01",
+                "--C",
+                "100",
+                "--D",
+                "10",
+                "--ck",
+                "0.8",
+                "--noniid"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}"
+        },
+        {
+            "name": "FLQ v1 - Fashion-MNIST IID",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/flq_fed_v1.py",
+            "args": [
+                "--dataset", "fmnist",
+                "--M", "10",
+                "--iters", "800",
+                "--b", "1",
+                "--lr", "0.02",
+                "--cl", "0.01",
+                "--C", "100",
+                "--D", "10",
+                "--ck", "0.8"
+            ],
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
