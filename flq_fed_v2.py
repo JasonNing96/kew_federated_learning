@@ -130,44 +130,48 @@ def run(args):
     # 模型与优化器
     model, optimizer = build_model(l2=args.cl, lr=args.lr)
 
-    # 超参与形状
+    # 形状与超参
     M = int(args.M); K = int(args.iters)
     nv = sum(int(np.prod(v.shape)) for v in model.trainable_variables)
 
-    mode = args.mode.lower()              # "fedavg" | "bbit" | "bin"
+    mode = args.mode.lower()                 # "fedavg" | "bbit" | "bin"
     b_up = 1 if mode == "bin" else int(args.b)
-    b_down = int(args.b_down)
-    if b_down in [0, 32]: b_down = 0      # 0 表示不做下行量化
+    b_down = int(args.b_down); b_down = 0 if b_down in [0, 32] else b_down
+
+    # 简易资源约束（两选一）：优先用 sel_clients；否则用 bits 预算；都为 0 表示全选
+    sel_clients = int(getattr(args, "sel_clients", 0))             # 每轮最多选多少客户端
+    up_budget_bits = float(getattr(args, "up_budget_bits", 0.0))   # 每轮上行比特预算
 
     # per-client 参考（上/下行）
     ref_up   = np.zeros((M, nv), dtype=np.float32)
     ref_down = np.zeros((M, nv), dtype=np.float32)
 
     # 统计曲线
-    loss_hist   = np.zeros(K, np.float32)
-    acc_hist    = np.zeros(K, np.float32)
-    cos_mean_h  = np.zeros(K, np.float32)   # 平均 cos(g,q)
-    cos_min_h   = np.zeros(K, np.float32)   # 最小 cos(g,q)
-    rmse_h      = np.zeros(K, np.float32)   # 均值 RMSE(g,q)
-    alpha_h     = np.zeros(K, np.float32)   # b=1 的 α 均值
-    bits_up_cum   = np.zeros(K, np.float64)
-    bits_down_cum = np.zeros(K, np.float64)
-
+    loss_hist = np.zeros(K, np.float32); acc_hist = np.zeros(K, np.float32)
+    cos_mean_h = np.zeros(K, np.float32); cos_min_h = np.zeros(K, np.float32)
+    rmse_h = np.zeros(K, np.float32); alpha_h = np.zeros(K, np.float32)
+    selcnt_h = np.zeros(K, np.int32)
+    bits_up_cum = np.zeros(K, np.float64); bits_down_cum = np.zeros(K, np.float64)
     cum_up = 0.0; cum_down = 0.0
 
     for k in range(K):
-        # 取全局权重快照
+        # 全局权重快照
         w_global = weights_to_vec(model.trainable_variables)
 
-        # 本轮统计
         train_acc = tf.keras.metrics.SparseCategoricalAccuracy()
         loss_round = 0.0
-        agg_vec = np.zeros(nv, np.float32)
-        grads_tpl = None
 
+        # 候选缓存
+        cand_vecs = []     # 上传向量（g 或 q）
+        cand_cost = []     # 该客户端上行比特成本
+        cand_gain = []     # 该客户端收益（排序依据）
+        cand_idx  = []     # 客户端索引
+        new_ref_up = []    # 若被选中则写回的 ref_up
+
+        # 本轮诊断
         cos_list, rmse_list, alpha_list = [], [], []
 
-        # ——遍历客户端——
+        # ——遍历客户端，产生候选——
         for m in range(M):
             # 下行量化（Broadcast）
             if b_down > 0:
@@ -177,7 +181,7 @@ def run(args):
                 cum_down += b_down * nv
             else:
                 vec_to_weights(w_global, model.trainable_variables)
-                cum_down += 32 * nv  # 统计：全精度下发
+                cum_down += 32 * nv  # 统计为全精度下发
 
             # 前向/反向
             x, y = next(trains[m])
@@ -190,70 +194,102 @@ def run(args):
                 l2 = sum([args.cl * tf.nn.l2_loss(v) for v in model.trainable_variables])
                 loss = ce + l2
             grads = tape.gradient(loss, model.trainable_variables)
-            grads_tpl = grads
             g = gradtovec(grads)
+            loss_round += float(loss.numpy()) / M
 
-            # 上行（Upload）
             if mode in ["bbit", "bin"]:
-                # 预先算 diff 用于统计
-                diff = g - ref_up[m]
-                if b_up == 1:
-                    alpha = float(np.mean(np.abs(diff)))
-                    alpha_list.append(alpha)
+                # 去量化后的量化梯度（不改既有量化逻辑）
                 q = quantd(g, ref_up[m], b=b_up)
-                ref_up[m] = q
 
-                # 方向与逼近误差
+                # 诊断
                 denom = (np.linalg.norm(g) * np.linalg.norm(q) + 1e-12)
                 cos_list.append(float(np.dot(g, q) / denom))
                 rmse_list.append(float(np.sqrt(np.mean((g - q) ** 2))))
+                if b_up == 1:
+                    diff = g - ref_up[m]
+                    alpha_list.append(float(np.mean(np.abs(diff))))
 
-                agg_vec += q
-                cum_up += b_up * nv
+                # 资源记账与收益（创新能量）
+                cost_bits = b_up * nv
+                gain = float(np.dot(q - ref_up[m], q - ref_up[m]))  # ||dL||^2
+
+                cand_vecs.append(q); cand_cost.append(cost_bits)
+                cand_gain.append(gain); cand_idx.append(m); new_ref_up.append(q)
             else:
-                agg_vec += g
-                cum_up += 32 * nv
+                # FedAvg：原梯度
+                cost_bits = 32 * nv
+                gain = float(np.dot(g, g))  # ||g||^2
+                cand_vecs.append(g); cand_cost.append(cost_bits)
+                cand_gain.append(gain); cand_idx.append(m); new_ref_up.append(ref_up[m])  # 不改 ref
 
-            loss_round += float(loss.numpy()) / M
-
-        # 还原全局权重再应用更新
+        # 恢复全局权重（避免被某客户端的 w_down 残留影响）
         vec_to_weights(w_global, model.trainable_variables)
-        g_hat = agg_vec / float(M)
-        cc = vectograd(g_hat, grads_tpl)
-        optimizer.apply_gradients(zip(cc, model.trainable_variables))
 
-        # 记录本轮
+        # ——选择策略：在预算内选“收益最大”的子集——
+        order = np.argsort(cand_gain)[::-1]  # 按收益降序
+        selected = []
+
+        if sel_clients > 0:
+            selected = list(order[:min(sel_clients, M)])
+            sel_cost_bits = sum(cand_cost[i] for i in selected)
+        elif up_budget_bits > 0:
+            budget = up_budget_bits
+            for i in order:
+                if cand_cost[i] <= budget:
+                    selected.append(i)
+                    budget -= cand_cost[i]
+            sel_cost_bits = up_budget_bits - budget
+        else:
+            selected = list(range(M))
+            sel_cost_bits = sum(cand_cost)
+
+        # ——聚合：仅选中者参与——
+        if len(selected) > 0:
+            agg_vec = np.zeros(nv, np.float32)
+            for i in selected:
+                agg_vec += cand_vecs[i]
+                # 写回 ref_up 仅对选中客户端生效
+                if mode in ["bbit", "bin"]:
+                    ref_up[cand_idx[i]] = new_ref_up[i]
+            g_hat = agg_vec / float(len(selected))
+            # 用本轮最后一次 grads 的形状模板
+            cc = vectograd(g_hat, grads)
+            optimizer.apply_gradients(zip(cc, model.trainable_variables))
+
+        # 记录统计
         loss_hist[k] = loss_round
         acc_hist[k]  = float(train_acc.result().numpy())
+        selcnt_h[k]  = len(selected)
+        cum_up += float(sel_cost_bits); bits_up_cum[k] = cum_up; bits_down_cum[k] = cum_down
+
         if len(cos_list):
             cos_mean_h[k] = float(np.mean(cos_list))
             cos_min_h[k]  = float(np.min(cos_list))
             rmse_h[k]     = float(np.mean(rmse_list))
-        if len(alpha_list):
-            alpha_h[k]    = float(np.mean(alpha_list))
-
-        bits_up_cum[k]   = cum_up
-        bits_down_cum[k] = cum_down
+            if len(alpha_list): alpha_h[k] = float(np.mean(alpha_list))
 
         # 打印
+        extra = ""
         if len(cos_list):
-            extra = f"  cosμ={cos_mean_h[k]:.3f} cosmin={cos_min_h[k]:.3f} rmseμ={rmse_h[k]:.4f}"
+            extra = f" | cosμ={cos_mean_h[k]:.3f} cosmin={cos_min_h[k]:.3f} rmseμ={rmse_h[k]:.4f}"
             if len(alpha_list): extra += f" αμ={alpha_h[k]:.4f}"
-        else:
-            extra = ""
-        print(f"[{k+1}/{K}] acc={acc_hist[k]:.4f} loss={loss_hist[k]:.4f}{extra} "
-              f"| bits↑Σ={bits_up_cum[k]:.2e} bits↓Σ={bits_down_cum[k]:.2e}")
+        print(f"[{k+1}/{K}] acc={acc_hist[k]:.4f} loss={loss_hist[k]:.4f} "
+              f"sel={selcnt_h[k]}/{M}{extra} | bits↑Σ={bits_up_cum[k]:.2e} bits↓Σ={bits_down_cum[k]:.2e}")
 
     # 测试
     acc = tf.keras.metrics.SparseCategoricalAccuracy()
     for xi, yi in Datate:
         acc.update_state(yi, model(xi, training=False))
     print(f"Test accuracy: {acc.result().numpy():.4f}")
+
     return {
         "loss": loss_hist, "acc": acc_hist,
-        "cos_mean": cos_mean_h, "cos_min": cos_min_h, "rmse": rmse_h, "alpha": alpha_h,
+        "cos_mean": cos_mean_h, "cos_min": cos_min_h,
+        "rmse": rmse_h, "alpha": alpha_h,
+        "selcnt": selcnt_h,
         "bits_up_cum": bits_up_cum, "bits_down_cum": bits_down_cum
     }
+
 
 # ------------------------- main -------------------------
 def parse_args():
@@ -269,8 +305,15 @@ def parse_args():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--cl", type=float, default=5e-4)
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--sel_clients", type=int, default=0, help="select clients")
+    p.add_argument("--up_budget_bits", type=float, default=0.0, help="uplink budget bits")
     return p.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
     _ = run(args)
+
+# python flq_fed_v2.py --dataset fmnist --mode bin --b_down 8 --lr 5e-4 --iters 800
+# 门限 clients 
+# python flq_fed_v2.py --dataset mnist --mode bbit --b 4 --b_down 8 --iters 800 --sel_clients 3
+# python flq_fed_v2.py --dataset mnist --mode bin --b_down 8 --iters 800 --up_budget_bits 1e9
