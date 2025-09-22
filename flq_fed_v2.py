@@ -121,32 +121,57 @@ def build_model(l2: float, lr: float):
 
 # ------------------------- training (with downlink quant) -------------------------
 def run(args):
+    import math
     tf.random.set_seed(args.seed); np.random.seed(args.seed)
 
-    # 数据与迭代器
+    # ---------- data ----------
     Datatr, Datate = make_federated_iid(args.dataset, args.M, args.batch, seed=args.seed)
     trains = [iter(ds) for ds in Datatr]
 
-    # 模型与优化器
+    # ---------- model ----------
     model, optimizer = build_model(l2=args.cl, lr=args.lr)
 
-    # 形状与超参
+    # ---------- meta ----------
     M = int(args.M); K = int(args.iters)
     nv = sum(int(np.prod(v.shape)) for v in model.trainable_variables)
 
-    mode = args.mode.lower()                 # "fedavg" | "bbit" | "bin"
-    b_up = 1 if mode == "bin" else int(args.b)
+    mode   = args.mode.lower()                          # "fedavg" | "bbit" | "bin"
+    b_up   = 1 if mode == "bin" else int(args.b)        # uplink bits
     b_down = int(args.b_down); b_down = 0 if b_down in [0, 32] else b_down
 
-    # 简易资源约束（两选一）：优先用 sel_clients；否则用 bits 预算；都为 0 表示全选
-    sel_clients = int(getattr(args, "sel_clients", 0))             # 每轮最多选多少客户端
-    up_budget_bits = float(getattr(args, "up_budget_bits", 0.0))   # 每轮上行比特预算
+    # 懒惰 + 历史强度参数（若未在 argparse 中出现，取默认）
+    D         = int(getattr(args, "D", 10))             # 历史窗口长度
+    ck        = float(getattr(args, "ck", 0.8))         # 历史权重缩放
+    C         = int(getattr(args, "C", 50))             # 未触发的超时轮数
+    warmup    = int(getattr(args, "warmup", 50))        # 暖启动强制参与
+    thr_scale = float(getattr(args, "thr_scale", 1.0))  # 门限缩放
+    alpha_lr  = float(args.lr)                           # 用学习率作 α（与论文口径一致）
 
-    # per-client 参考（上/下行）
+    # 资源约束：两选一（都为 0 => 全选）
+    sel_clients     = int(getattr(args, "sel_clients", 0))           # 每轮最多选多少客户端
+    up_budget_bits  = float(getattr(args, "up_budget_bits", 0.0))    # 每轮上行比特预算
+
+    # ---------- states ----------
+    # 上/下行参考（相对量化中心）
     ref_up   = np.zeros((M, nv), dtype=np.float32)
     ref_down = np.zeros((M, nv), dtype=np.float32)
 
-    # 统计曲线
+    # 懒惰触发需要：历史强度、误差记忆、超时钟
+    theta = np.zeros(nv, dtype=np.float32)
+    dtheta_hist = np.zeros((nv, D), dtype=np.float32)   # 每列存一轮的 Δθ
+    # 预计算历史权重矩阵 ksi[d, k]（第 d 列的权重，随轮次衰减）
+    ksi = np.zeros((D, D + 1), dtype=np.float32)
+    for d in range(D):
+        ksi[d, 0] = 1.0
+        for k in range(1, D + 1):
+            ksi[d, k] = 1.0 / float(d + 1)
+    ksi *= ck
+
+    e    = np.zeros(M, np.float32)      # 本轮量化误差 ||q-g||^2
+    ehat = np.zeros(M, np.float32)      # 上次误差
+    clock = np.zeros(M, np.int32)       # 超时计数
+
+    # ---------- logs ----------
     loss_hist = np.zeros(K, np.float32); acc_hist = np.zeros(K, np.float32)
     cos_mean_h = np.zeros(K, np.float32); cos_min_h = np.zeros(K, np.float32)
     rmse_h = np.zeros(K, np.float32); alpha_h = np.zeros(K, np.float32)
@@ -155,25 +180,36 @@ def run(args):
     cum_up = 0.0; cum_down = 0.0
 
     for k in range(K):
-        # 全局权重快照
-        w_global = weights_to_vec(model.trainable_variables)
+        # ---- 维护历史 Δθ 与历史强度 me_k ----
+        var = weights_to_vec(model.trainable_variables)
+        if k > 0:
+            dtheta = var - theta
+            dtheta_hist = np.roll(dtheta_hist, 1, axis=1); dtheta_hist[:, 0] = dtheta
+        theta = var
+        # 历史强度：me_k = Σ_d ksi[d,k] * ||Δθ_{k-d}||^2
+        me_k = 0.0
+        col_limit = min(k, D)            # 可用的历史列数
+        kk = min(k, D)
+        for d in range(col_limit):
+            col = dtheta_hist[:, d]
+            me_k += float(ksi[d, kk] * (col @ col))
 
+        # ---- 快照全局权重（用于下发 & 回滚）----
+        w_global = var.copy()
+
+        # ---- 本轮统计 ----
         train_acc = tf.keras.metrics.SparseCategoricalAccuracy()
         loss_round = 0.0
+        grads_tpl = None
 
-        # 候选缓存
-        cand_vecs = []     # 上传向量（g 或 q）
-        cand_cost = []     # 该客户端上行比特成本
-        cand_gain = []     # 该客户端收益（排序依据）
-        cand_idx  = []     # 客户端索引
-        new_ref_up = []    # 若被选中则写回的 ref_up
-
-        # 本轮诊断
+        # 候选集缓存
+        cand_idx, cand_vec, cand_gain, cand_cost = [], [], [], []
+        cand_q_for_ref = []  # 仅 bbit/bin：若入选则写回 ref_up
         cos_list, rmse_list, alpha_list = [], [], []
 
-        # ——遍历客户端，产生候选——
+        # ---- 遍历所有客户端：生成候选（先过门限，再进入预算选择）----
         for m in range(M):
-            # 下行量化（Broadcast）
+            # 下行参数量化（广播）
             if b_down > 0:
                 w_down = quantd(w_global, ref_down[m], b=b_down)
                 ref_down[m] = w_down
@@ -181,7 +217,7 @@ def run(args):
                 cum_down += b_down * nv
             else:
                 vec_to_weights(w_global, model.trainable_variables)
-                cum_down += 32 * nv  # 统计为全精度下发
+                cum_down += 32 * nv
 
             # 前向/反向
             x, y = next(trains[m])
@@ -194,119 +230,141 @@ def run(args):
                 l2 = sum([args.cl * tf.nn.l2_loss(v) for v in model.trainable_variables])
                 loss = ce + l2
             grads = tape.gradient(loss, model.trainable_variables)
+            grads_tpl = grads
             g = gradtovec(grads)
             loss_round += float(loss.numpy()) / M
 
             if mode in ["bbit", "bin"]:
-                # 去量化后的量化梯度（不改既有量化逻辑）
-                q = quantd(g, ref_up[m], b=b_up)
-
-                # 诊断
+                diff = g - ref_up[m]
+                if b_up == 1:
+                    alpha_list.append(float(np.mean(np.abs(diff))))
+                q = quantd(g, ref_up[m], b=b_up)          # 去量化后的量化梯度
+                # 量化误差与方向
+                e[m] = float(np.dot(q - g, q - g))
                 denom = (np.linalg.norm(g) * np.linalg.norm(q) + 1e-12)
                 cos_list.append(float(np.dot(g, q) / denom))
-                rmse_list.append(float(np.sqrt(np.mean((g - q) ** 2))))
-                if b_up == 1:
-                    diff = g - ref_up[m]
-                    alpha_list.append(float(np.mean(np.abs(diff))))
-
-                # 资源记账与收益（创新能量）
-                cost_bits = b_up * nv
-                gain = float(np.dot(q - ref_up[m], q - ref_up[m]))  # ||dL||^2
-
-                cand_vecs.append(q); cand_cost.append(cost_bits)
-                cand_gain.append(gain); cand_idx.append(m); new_ref_up.append(q)
+                rmse_list.append(float(math.sqrt(np.mean((g - q) ** 2))))
+                # 创新量
+                dL = q - ref_up[m]
+                gain = float(np.dot(dL, dL))
+                # 门限：历史强度 + 量化误差项
+                rhs = (me_k / (alpha_lr * alpha_lr * M * M)) + 3.0 * (e[m] + ehat[m])
+                pass_thr = (gain >= thr_scale * rhs) or (k < warmup) or (clock[m] >= C)
+                if pass_thr:
+                    cand_idx.append(m)
+                    cand_vec.append(q)
+                    cand_q_for_ref.append(q)
+                    cand_gain.append(gain)
+                    cand_cost.append(b_up * nv)
+                # 否则仅累积时钟，先不进入候选
             else:
-                # FedAvg：原梯度
-                cost_bits = 32 * nv
-                gain = float(np.dot(g, g))  # ||g||^2
-                cand_vecs.append(g); cand_cost.append(cost_bits)
-                cand_gain.append(gain); cand_idx.append(m); new_ref_up.append(ref_up[m])  # 不改 ref
+                # FedAvg：无量化门限（可选同样门限，用 ||g||^2 与 e=0）
+                gain = float(np.dot(g, g))
+                cand_idx.append(m)
+                cand_vec.append(g)
+                cand_q_for_ref.append(ref_up[m])  # 不改 ref
+                cand_gain.append(gain)
+                cand_cost.append(32 * nv)
 
-        # 恢复全局权重（避免被某客户端的 w_down 残留影响）
+        # 回滚全局权重，避免被任一 w_down 残留影响
         vec_to_weights(w_global, model.trainable_variables)
 
-        # ——选择策略：在预算内选“收益最大”的子集——
-        order = np.argsort(cand_gain)[::-1]  # 按收益降序
+        # ---- 选择：在预算内选收益/成本高的子集 ----
+        order = np.argsort(np.array(cand_gain) / (np.array(cand_cost) + 1e-12))[::-1]
         selected = []
-
         if sel_clients > 0:
-            selected = list(order[:min(sel_clients, M)])
-            sel_cost_bits = sum(cand_cost[i] for i in selected)
-        elif up_budget_bits > 0:
+            selected = list(order[:min(sel_clients, len(order))])
+            cost_bits = sum(cand_cost[i] for i in selected)
+        elif up_budget_bits > 0.0:
             budget = up_budget_bits
             for i in order:
                 if cand_cost[i] <= budget:
-                    selected.append(i)
-                    budget -= cand_cost[i]
-            sel_cost_bits = up_budget_bits - budget
+                    selected.append(i); budget -= cand_cost[i]
+            cost_bits = up_budget_bits - budget
         else:
-            selected = list(range(M))
-            sel_cost_bits = sum(cand_cost)
+            selected = list(order)  # 全选候选
+            cost_bits = sum(cand_cost[i] for i in selected)
 
-        # ——聚合：仅选中者参与——
+        # ---- 聚合与写回状态：仅对入选者 ----
         if len(selected) > 0:
-            agg_vec = np.zeros(nv, np.float32)
+            agg = np.zeros(nv, np.float32)
             for i in selected:
-                agg_vec += cand_vecs[i]
-                # 写回 ref_up 仅对选中客户端生效
+                m = cand_idx[i]
+                agg += cand_vec[i]
                 if mode in ["bbit", "bin"]:
-                    ref_up[cand_idx[i]] = new_ref_up[i]
-            g_hat = agg_vec / float(len(selected))
-            # 用本轮最后一次 grads 的形状模板
-            cc = vectograd(g_hat, grads)
+                    ref_up[m] = cand_q_for_ref[i]   # 更新参考
+                    ehat[m]  = e[m]                 # 记忆误差
+                    clock[m] = 0
+                else:
+                    clock[m] = 0
+            g_hat = agg / float(len(selected))
+            cc = vectograd(g_hat, grads_tpl)
             optimizer.apply_gradients(zip(cc, model.trainable_variables))
+        # 未入选者：仅时钟 +1
+        not_sel = set(range(M)) - set(cand_idx[i] for i in selected)
+        for m in not_sel:
+            clock[m] = min(clock[m] + 1, C + 1)
 
-        # 记录统计
+        # ---- 统计与打印 ----
+        cum_up += float(cost_bits)
         loss_hist[k] = loss_round
         acc_hist[k]  = float(train_acc.result().numpy())
         selcnt_h[k]  = len(selected)
-        cum_up += float(sel_cost_bits); bits_up_cum[k] = cum_up; bits_down_cum[k] = cum_down
-
+        bits_up_cum[k]   = cum_up
+        bits_down_cum[k] = cum_down
         if len(cos_list):
             cos_mean_h[k] = float(np.mean(cos_list))
             cos_min_h[k]  = float(np.min(cos_list))
             rmse_h[k]     = float(np.mean(rmse_list))
-            if len(alpha_list): alpha_h[k] = float(np.mean(alpha_list))
+            if b_up == 1 and len(alpha_list): alpha_h[k] = float(np.mean(alpha_list))
 
-        # 打印
         extra = ""
         if len(cos_list):
             extra = f" | cosμ={cos_mean_h[k]:.3f} cosmin={cos_min_h[k]:.3f} rmseμ={rmse_h[k]:.4f}"
-            if len(alpha_list): extra += f" αμ={alpha_h[k]:.4f}"
+            if b_up == 1 and len(alpha_list): extra += f" αμ={alpha_h[k]:.4f}"
         print(f"[{k+1}/{K}] acc={acc_hist[k]:.4f} loss={loss_hist[k]:.4f} "
-              f"sel={selcnt_h[k]}/{M}{extra} | bits↑Σ={bits_up_cum[k]:.2e} bits↓Σ={bits_down_cum[k]:.2e}")
+              f"sel={selcnt_h[k]}/{len(cand_idx)}/{M}{extra} | bits↑Σ={bits_up_cum[k]:.2e} bits↓Σ={bits_down_cum[k]:.2e}")
 
-    # 测试
+    # ---------- eval ----------
     acc = tf.keras.metrics.SparseCategoricalAccuracy()
     for xi, yi in Datate:
         acc.update_state(yi, model(xi, training=False))
     print(f"Test accuracy: {acc.result().numpy():.4f}")
 
     return {
-        "loss": loss_hist, "acc": acc_hist,
-        "cos_mean": cos_mean_h, "cos_min": cos_min_h,
-        "rmse": rmse_h, "alpha": alpha_h,
-        "selcnt": selcnt_h,
+        "loss": loss_hist, "acc": acc_hist, "selcnt": selcnt_h,
+        "cos_mean": cos_mean_h, "cos_min": cos_min_h, "rmse": rmse_h, "alpha": alpha_h,
         "bits_up_cum": bits_up_cum, "bits_down_cum": bits_down_cum
     }
 
 
+
 # ------------------------- main -------------------------
 def parse_args():
-    p = argparse.ArgumentParser("FLQ v2 with downlink parameter quantization")
+    p = argparse.ArgumentParser("FLQ v2 with downlink parameter quantization + lazy/budget")
+    # data
     p.add_argument("--dataset", type=str, default="mnist",
-                   choices=["mnist","fmnist","fashion","fashion_mnist"])
+                   choices=["mnist", "fmnist", "fashion", "fashion_mnist"])
     p.add_argument("--M", type=int, default=10)
     p.add_argument("--iters", type=int, default=800)
     p.add_argument("--batch", type=int, default=64)
-    p.add_argument("--mode", type=str, default="fedavg", choices=["fedavg","bbit","bin"])
+    # modes
+    p.add_argument("--mode", type=str, default="bbit", choices=["fedavg", "bbit", "bin"])
     p.add_argument("--b", type=int, default=4, help="uplink bits; bin mode forces 1")
-    p.add_argument("--b_down", type=int, default=8, help="downlink bits; 0/32 to disable")
+    p.add_argument("--b_down", type=int, default=8, help="downlink bits; 0/32 disable")
+    # optimization
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--cl", type=float, default=5e-4)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--sel_clients", type=int, default=0, help="select clients")
-    p.add_argument("--up_budget_bits", type=float, default=0.0, help="uplink budget bits")
+    # budget selector (set one; both 0 -> no budget limit)
+    p.add_argument("--sel_clients", type=int, default=10, help="max selected clients per round")
+    p.add_argument("--up_budget_bits", type=float, default=0.0, help="uplink bit budget per round")
+    # lazy trigger (defaults effectively OFF to focus on budget-only comparisons)
+    p.add_argument("--D", type=int, default=10, help="history window length")
+    p.add_argument("--ck", type=float, default=0.8, help="history weight scale")
+    p.add_argument("--C", type=int, default=1000000000, help="timeout rounds for force select")
+    p.add_argument("--warmup", type=int, default=0, help="force select rounds at start")
+    p.add_argument("--thr_scale", type=float, default=0.0, help="threshold scale (0 disables)")
     return p.parse_args()
 
 if __name__ == "__main__":
@@ -317,3 +375,8 @@ if __name__ == "__main__":
 # 门限 clients 
 # python flq_fed_v2.py --dataset mnist --mode bbit --b 4 --b_down 8 --iters 800 --sel_clients 3
 # python flq_fed_v2.py --dataset mnist --mode bin --b_down 8 --iters 800 --up_budget_bits 1e9
+
+# python flq_fed_v2.py --dataset mnist --mode bbit --b 4 --M 10 --iters 800 --batch 64 --lr 1e-3 --cl 5e-4 --b_down 8 --up_budget_bits 44910528
+# python flq_fed_v2.py --dataset mnist --mode bbit --b 2 --M 10 --iters 800 --batch 64 --lr 1e-3 --cl 5e-4 --b_down 8 --up_budget_bits 44910528
+
+# python flq_fed_v2.py --dataset mnist --mode bin --M 10 --iters 800 --batch 64 --lr 5e-4 --cl 5e-4 --b_down 8 --up_budget_bits 44910528 
