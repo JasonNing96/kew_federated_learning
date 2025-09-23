@@ -3,6 +3,35 @@
 from __future__ import annotations
 import argparse, numpy as np, tensorflow as tf
 
+# ------------------------- Save fig -----------------------------------
+import pandas as pd, os
+
+def save_excel_data(outfile: str, mode: str, history: dict,
+                    bin_series: np.ndarray | None = None,
+                    grad_samples: np.ndarray | None = None):
+    os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
+    iters = len(history["loss"])
+    df_curve = pd.DataFrame({
+        "iter": np.arange(1, iters+1, dtype=np.int32),
+        "loss": history["loss"].astype(np.float32),
+        "acc":  history["acc"].astype(np.float32),
+        "selcnt": history.get("selcnt", np.zeros(iters, np.int32)),
+        "bits_up_cum": history.get("bits_up_cum", np.zeros(iters, np.float64)),
+        "bits_down_cum": history.get("bits_down_cum", np.zeros(iters, np.float64)),
+    })
+    df_curve["cum_bits_total"] = df_curve["bits_up_cum"] + df_curve["bits_down_cum"]
+
+    with pd.ExcelWriter(outfile) as xw:
+        df_curve.to_excel(xw, sheet_name=f"curve_{mode}", index=False)
+        if bin_series is not None:
+            pd.DataFrame({"comm": np.arange(len(bin_series), dtype=np.int32),
+                          "bit":  np.array(bin_series, dtype=np.int8)}
+            ).to_excel(xw, sheet_name=f"bin_{mode}", index=False)
+        if grad_samples is not None:
+            pd.DataFrame({"gt": np.array(grad_samples, dtype=np.float32)}
+            ).to_excel(xw, sheet_name=f"gt_{mode}", index=False)
+    print(f"[save_excel_data] wrote {outfile}")
+    
 # ------------------------- utils: pack/unpack -------------------------
 def weights_to_vec(vars_list):
     return np.concatenate([v.numpy().reshape(-1) for v in vars_list]).astype(np.float32)
@@ -85,6 +114,93 @@ def make_federated_iid(dataset: str, M: int, batch: int, seed: int = 1234):
              .batch(512).prefetch(tf.data.AUTOTUNE))
     return dss,test_ds
 
+def make_federated_non_iid(dataset: str,
+                           M: int,
+                           batch: int,
+                           alpha: float = 0.3,
+                           seed: int = 1234,
+                           max_tries: int = 100):
+    """
+    Dirichlet 非 IID 划分。
+    - dataset: "mnist" | "fmnist"
+    - M: 客户端数
+    - batch: 训练 batch 大小
+    - alpha: Dirichlet 超参（越小越非 IID：0.1/0.3 常用）
+    - seed: 随机种
+    - max_tries: 若有客户端样本数 < batch，则重采 Dirichlet 的最多次数
+    返回: (list[tf.data.Dataset], test_ds)
+    """
+    (xtr, ytr), (xte, yte) = _load_arrays(dataset)
+    num_classes = int(ytr.max()) + 1
+    rng = np.random.default_rng(seed)
+
+    # 预先按类分桶
+    per_class_idx = [np.where(ytr == c)[0].tolist() for c in range(num_classes)]
+
+    def _sample_partition():
+        # 打乱每个类桶
+        for li in per_class_idx:
+            rng.shuffle(li)
+        # Dirichlet 比例：shape = (num_classes, M)
+        P = rng.dirichlet([alpha] * M, size=num_classes)
+        client_bins = [[] for _ in range(M)]
+        # 按比例为每个类分配到各客户端
+        for c in range(num_classes):
+            idxs = per_class_idx[c]
+            n_c = len(idxs)
+            if n_c == 0:
+                continue
+            # 先按 floor 分配，再把余数给概率大的客户端
+            raw = P[c] * n_c
+            cnt = np.floor(raw).astype(int)
+            rem = n_c - int(cnt.sum())
+            if rem > 0:
+                order = np.argsort(raw - cnt)[::-1]
+                for j in range(rem):
+                    cnt[order[j % M]] += 1
+            # 切片放入
+            start = 0
+            for m in range(M):
+                k = int(cnt[m])
+                if k > 0:
+                    client_bins[m].extend(idxs[start:start + k])
+                    start += k
+        # 打乱每个客户端样本
+        for m in range(M):
+            rng.shuffle(client_bins[m])
+        return client_bins
+
+    # 反复采样直到所有客户端都有至少 batch 个样本（避免空迭代器）
+    bins = _sample_partition()
+    tries = 1
+    while tries < max_tries and min(len(b) for b in bins) < batch:
+        bins = _sample_partition()
+        tries += 1
+
+    # 构建 tf.data pipeline
+    dss = []
+    for m in range(M):
+        inds = np.array(bins[m], dtype=np.int64)
+        # 如果仍不足一个 batch，则补采全局样本到 batch（极端情况下兜底）
+        if len(inds) < batch:
+            extra = rng.integers(low=0, high=len(xtr), size=(batch - len(inds),), endpoint=False)
+            inds = np.concatenate([inds, extra], axis=0)
+        xm, ym = xtr[inds], ytr[inds]
+        ds = (tf.data.Dataset.from_tensor_slices(
+                (tf.convert_to_tensor(xm), tf.convert_to_tensor(ym)))
+              .shuffle(min(len(inds), 10000), seed=seed, reshuffle_each_iteration=True)
+              .batch(batch, drop_remainder=True)
+              .repeat()
+              .prefetch(tf.data.AUTOTUNE))
+        dss.append(ds)
+
+    test_ds = (tf.data.Dataset.from_tensor_slices(
+                (tf.convert_to_tensor(xte), tf.convert_to_tensor(yte)))
+               .batch(512)
+               .prefetch(tf.data.AUTOTUNE))
+    return dss, test_ds
+
+
 # ------------------------- model -------------------------
 # def build_model(l2: float, lr: float):
 #     # 修正点：
@@ -119,15 +235,33 @@ def build_model(l2: float, lr: float):
     opt = tf.keras.optimizers.Adam(learning_rate=lr)
     return model, opt
 
+def laq_quantize_stochastic(g: np.ndarray, k: int = 8) -> np.ndarray:
+    # 对称 k-bit, 动态尺度 s = max|g| / L, L = 2^(k-1)-1
+    L = float(2**(k-1) - 1)
+    amax = float(np.max(np.abs(g))) + 1e-12
+    s = amax / L
+    y = g / s
+    low = np.floor(y)
+    p = y - low
+    rnd = (np.random.rand(*y.shape) < p).astype(np.float32)
+    q_int = np.clip(low + rnd, -L, L)
+    return (q_int * s).astype(np.float32)
+
 # ------------------------- training (with downlink quant) -------------------------
 def run(args):
     import math
     tf.random.set_seed(args.seed); np.random.seed(args.seed)
 
     # ---------- data ----------
-    Datatr, Datate = make_federated_iid(args.dataset, args.M, args.batch, seed=args.seed)
-    trains = [iter(ds) for ds in Datatr]
+    part = getattr(args, "partition", "iid").lower()   # "iid" | "non_iid"
+    alpha = float(getattr(args, "dir_alpha", 0.3))     # non-iid 的 Dirichlet α
+    # Datatr, Datate = make_federated_iid(args.dataset, args.M, args.batch, seed=args.seed)
+    if part == "iid":
+        Datatr, Datate = make_federated_iid(args.dataset, args.M, args.batch, seed=args.seed)
+    else:
+        Datatr, Datate = make_federated_non_iid(args.dataset, args.M, args.batch, alpha=alpha, seed=args.seed)
 
+    trains = [iter(ds) for ds in Datatr]   
     # ---------- model ----------
     model, optimizer = build_model(l2=args.cl, lr=args.lr)
 
@@ -257,6 +391,17 @@ def run(args):
                     cand_gain.append(gain)
                     cand_cost.append(b_up * nv)
                 # 否则仅累积时钟，先不进入候选
+            if mode in ["laq8"]:
+                q = laq_quantize_stochastic(g, k=8)
+                # 诊断
+                denom = (np.linalg.norm(g)*np.linalg.norm(q) + 1e-12)
+                cos_list.append(float(np.dot(g, q)/denom))
+                rmse_list.append(float(np.sqrt(np.mean((g - q)**2))))
+                # 成本与收益（与 fedavg 一致，用 ||g||^2）
+                cost_bits = 8 * nv
+                gain = float(np.dot(g, g))
+                cand_idx.append(m); cand_vec.append(q); cand_q_for_ref.append(None)
+                cand_gain.append(gain); cand_cost.append(cost_bits)
             else:
                 # FedAvg：无量化门限（可选同样门限，用 ||g||^2 与 e=0）
                 gain = float(np.dot(g, g))
@@ -349,7 +494,7 @@ def parse_args():
     p.add_argument("--iters", type=int, default=800)
     p.add_argument("--batch", type=int, default=64)
     # modes
-    p.add_argument("--mode", type=str, default="bbit", choices=["fedavg", "bbit", "bin"])
+    p.add_argument("--mode", type=str, default="bbit", choices=["fedavg", "bbit", "bin","laq8"])
     p.add_argument("--b", type=int, default=4, help="uplink bits; bin mode forces 1")
     p.add_argument("--b_down", type=int, default=8, help="downlink bits; 0/32 disable")
     # optimization
@@ -365,11 +510,17 @@ def parse_args():
     p.add_argument("--C", type=int, default=1000000000, help="timeout rounds for force select")
     p.add_argument("--warmup", type=int, default=0, help="force select rounds at start")
     p.add_argument("--thr_scale", type=float, default=0.0, help="threshold scale (0 disables)")
+    p.add_argument("--partition", type=str, default="iid", choices=["iid","non_iid"])
+    p.add_argument("--dir_alpha", type=float, default=0.3)  # non-iid 强度，越小越非IID
     return p.parse_args()
 
 if __name__ == "__main__":
     args = parse_args()
-    _ = run(args)
+    hist = run(args)
+    prefix = "results"
+    outfile = f"{prefix}_{args.dataset}_{args.mode}.xlsx"
+    save_excel_data(outfile, args.mode, hist,
+                bin_series=None, grad_samples=None)  # bin/样本可按需填
 
 # python flq_fed_v2.py --dataset fmnist --mode bin --b_down 8 --lr 5e-4 --iters 800
 # 门限 clients 

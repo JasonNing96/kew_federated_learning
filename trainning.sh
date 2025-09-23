@@ -1,6 +1,38 @@
-python flq_fed.py --dataset mnist --mode qgd        --iters 1000 --out_prefix results
-python flq_fed.py --dataset mnist --mode laq8       --iters 1000 --out_prefix results
-python flq_fed.py --dataset mnist --mode flq_lowbit --iters 1000 --out_prefix results
-python flq_fed.py --dataset mnist --mode flq_bin    --iters 1000 --b_up 1 --out_prefix results
+# QGD 
+# python flq_fed_v2.py --dataset fmnist --mode fedavg --b_down 32 \
+#   --lr 5e-4 --sel_clients 0 --up_budget_bits 17000000 \
+#   --M 10 --iters 1500 --batch 64 --cl 5e-4 --seed 42 \
+#   --partition non_iid --dir_alpha 0.1 --thr_scale 0 --warmup 0 --C 1000000000
 
-python plot_flq_fed.py --excel_dir . --dataset mnist --save --prefix results
+#   # laQ
+#   python flq_fed_v2.py --dataset fmnist --mode laq8 --b_down 32 \
+#   --lr 5e-4 --sel_clients 0 --up_budget_bits 17000000 \
+#   --M 10 --iters 1500 --batch 64 --cl 5e-4 --seed 42 \
+#   --partition non_iid --dir_alpha 0.1 --thr_scale 0 --warmup 0 --C 1000000000
+
+#   # flq_lowbit
+#   python flq_fed_v2.py --dataset fmnist --mode bbit --b 8 --b_down 8 \
+#   --lr 5e-4 --sel_clients 0 --up_budget_bits 17000000 \
+#   --M 10 --iters 1500 --batch 64 --cl 5e-4 --seed 42 \
+#   --partition non_iid --dir_alpha 0.1 --thr_scale 0 --warmup 0 --C 1000000000
+
+#   # flq_bin
+#   python flq_fed_v2.py --dataset fmnist --mode bin --b_down 8 \
+#   --lr 5e-4 --sel_clients 0 --up_budget_bits 17000000 \
+#   --M 10 --iters 1500 --batch 64 --cl 5e-4 --seed 42 \
+#   --partition non_iid --dir_alpha 0.1 --thr_scale 0 --warmup 0 --C 1000000000
+
+# QGD (蓝)
+python flq_fed_v2.py --dataset fmnist --mode fedavg --b_down 32 --lr 1e-3 \
+  --up_budget_bits 17000000 --sel_clients 0 --partition non_iid --dir_alpha 0.1 \
+  --thr_scale 0 --warmup 0 --C 1000000000
+
+# LAQ (绿虚线)
+python flq_fed_v2.py --dataset fmnist --mode laq8 --b_down 32 --lr 1e-3 \
+  --up_budget_bits 17000000 --sel_clients 0 --partition non_iid --dir_alpha 0.1 \
+  --thr_scale 0 --warmup 0 --C 1000000000
+
+# FLQ(Ours) = low-bit 上行8b + 下发8b (紫)
+python flq_fed_v2.py --dataset fmnist --mode bbit --b 8 --b_down 8 --lr 1e-3 \
+  --up_budget_bits 17000000 --sel_clients 0 --partition non_iid --dir_alpha 0.1 \
+  --thr_scale 0 --warmup 0 --C 1000000000
