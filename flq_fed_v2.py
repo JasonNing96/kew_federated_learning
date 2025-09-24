@@ -9,17 +9,20 @@ import pandas as pd, os
 def save_excel_data(outfile: str, mode: str, history: dict,
                     bin_series: np.ndarray | None = None,
                     grad_samples: np.ndarray | None = None):
+    import pandas as pd, os, numpy as np
     os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
     iters = len(history["loss"])
     df_curve = pd.DataFrame({
         "iter": np.arange(1, iters+1, dtype=np.int32),
-        "loss": history["loss"].astype(np.float32),
+        "loss": history["loss"].astype(np.float32),             # 训练端平均(可参考)
         "acc":  history["acc"].astype(np.float32),
         "selcnt": history.get("selcnt", np.zeros(iters, np.int32)),
         "bits_up_cum": history.get("bits_up_cum", np.zeros(iters, np.float64)),
         "bits_down_cum": history.get("bits_down_cum", np.zeros(iters, np.float64)),
     })
     df_curve["cum_bits_total"] = df_curve["bits_up_cum"] + df_curve["bits_down_cum"]
+    if "entropy" in history:
+        df_curve["entropy"] = history["entropy"].astype(np.float32)  # Fig.2 用它
 
     with pd.ExcelWriter(outfile) as xw:
         df_curve.to_excel(xw, sheet_name=f"curve_{mode}", index=False)
@@ -31,6 +34,7 @@ def save_excel_data(outfile: str, mode: str, history: dict,
             pd.DataFrame({"gt": np.array(grad_samples, dtype=np.float32)}
             ).to_excel(xw, sheet_name=f"gt_{mode}", index=False)
     print(f"[save_excel_data] wrote {outfile}")
+
     
 # ------------------------- utils: pack/unpack -------------------------
 def weights_to_vec(vars_list):
@@ -249,118 +253,107 @@ def laq_quantize_stochastic(g: np.ndarray, k: int = 8) -> np.ndarray:
 
 # ------------------------- training (with downlink quant) -------------------------
 def run(args):
-    import math
-    tf.random.set_seed(args.seed); np.random.seed(args.seed)
+    import numpy as np, math, tensorflow as tf
+
+    # ---------- helpers ----------
+    def laq_quantize_stochastic(g: np.ndarray, k: int = 8) -> np.ndarray:
+        L = float(2**(k-1) - 1)
+        amax = float(np.max(np.abs(g))) + 1e-12
+        s = amax / L
+        y = g / s
+        low = np.floor(y)
+        p = y - low
+        rnd = (np.random.rand(*y.shape) < p).astype(np.float32)
+        q_int = np.clip(low + rnd, -L, L)
+        return (q_int * s).astype(np.float32)
 
     # ---------- data ----------
-    part = getattr(args, "partition", "iid").lower()   # "iid" | "non_iid"
-    alpha = float(getattr(args, "dir_alpha", 0.3))     # non-iid 的 Dirichlet α
-    # Datatr, Datate = make_federated_iid(args.dataset, args.M, args.batch, seed=args.seed)
+    part  = getattr(args, "partition", "iid").lower()
+    alpha = float(getattr(args, "dir_alpha", 0.3))
     if part == "iid":
         Datatr, Datate = make_federated_iid(args.dataset, args.M, args.batch, seed=args.seed)
     else:
         Datatr, Datate = make_federated_non_iid(args.dataset, args.M, args.batch, alpha=alpha, seed=args.seed)
+    trains = [iter(ds) for ds in Datatr]
 
-    trains = [iter(ds) for ds in Datatr]   
     # ---------- model ----------
     model, optimizer = build_model(l2=args.cl, lr=args.lr)
 
-    # ---------- meta ----------
+    # ---------- meta / states ----------
     M = int(args.M); K = int(args.iters)
     nv = sum(int(np.prod(v.shape)) for v in model.trainable_variables)
+    mode   = args.mode.lower()                        # "fedavg" | "bbit" | "bin" | "laq8"
+    b_up   = 1 if mode == "bin" else int(getattr(args, "b", 8))
+    b_down = int(getattr(args, "b_down", 0))          # 0→32-bit 下发；>0→低比特下发
 
-    mode   = args.mode.lower()                          # "fedavg" | "bbit" | "bin"
-    b_up   = 1 if mode == "bin" else int(args.b)        # uplink bits
-    b_down = int(args.b_down); b_down = 0 if b_down in [0, 32] else b_down
+    # 懒惰门限参数
+    D = int(getattr(args, "D", 10))
+    ck = float(getattr(args, "ck", 0.8))
+    C  = int(getattr(args, "C", 50))
+    warmup = int(getattr(args, "warmup", 50))
+    thr_scale = float(getattr(args, "thr_scale", 1.0))
+    alpha_lr  = float(args.lr)
 
-    # 懒惰 + 历史强度参数（若未在 argparse 中出现，取默认）
-    D         = int(getattr(args, "D", 10))             # 历史窗口长度
-    ck        = float(getattr(args, "ck", 0.8))         # 历史权重缩放
-    C         = int(getattr(args, "C", 50))             # 未触发的超时轮数
-    warmup    = int(getattr(args, "warmup", 50))        # 暖启动强制参与
-    thr_scale = float(getattr(args, "thr_scale", 1.0))  # 门限缩放
-    alpha_lr  = float(args.lr)                           # 用学习率作 α（与论文口径一致）
+    # 资源约束
+    sel_clients    = int(getattr(args, "sel_clients", 0))
+    up_budget_bits = float(getattr(args, "up_budget_bits", 0.0))
 
-    # 资源约束：两选一（都为 0 => 全选）
-    sel_clients     = int(getattr(args, "sel_clients", 0))           # 每轮最多选多少客户端
-    up_budget_bits  = float(getattr(args, "up_budget_bits", 0.0))    # 每轮上行比特预算
-
-    # ---------- states ----------
-    # 上/下行参考（相对量化中心）
-    ref_up   = np.zeros((M, nv), dtype=np.float32)
-    ref_down = np.zeros((M, nv), dtype=np.float32)
-
-    # 懒惰触发需要：历史强度、误差记忆、超时钟
-    theta = np.zeros(nv, dtype=np.float32)
-    dtheta_hist = np.zeros((nv, D), dtype=np.float32)   # 每列存一轮的 Δθ
-    # 预计算历史权重矩阵 ksi[d, k]（第 d 列的权重，随轮次衰减）
-    ksi = np.zeros((D, D + 1), dtype=np.float32)
+    # 参考与门限状态
+    ref_up   = np.zeros((M, nv), np.float32)
+    ref_down = np.zeros((M, nv), np.float32)
+    theta = np.zeros(nv, np.float32)
+    dtheta_hist = np.zeros((nv, D), np.float32)
+    ksi = np.zeros((D, D + 1), np.float32)
     for d in range(D):
         ksi[d, 0] = 1.0
-        for k in range(1, D + 1):
-            ksi[d, k] = 1.0 / float(d + 1)
+        for k in range(1, D + 1): ksi[d, k] = 1.0 / float(d + 1)
     ksi *= ck
-
-    e    = np.zeros(M, np.float32)      # 本轮量化误差 ||q-g||^2
-    ehat = np.zeros(M, np.float32)      # 上次误差
-    clock = np.zeros(M, np.int32)       # 超时计数
+    e = np.zeros(M, np.float32); ehat = np.zeros(M, np.float32); clock = np.zeros(M, np.int32)
 
     # ---------- logs ----------
-    loss_hist = np.zeros(K, np.float32); acc_hist = np.zeros(K, np.float32)
-    cos_mean_h = np.zeros(K, np.float32); cos_min_h = np.zeros(K, np.float32)
-    rmse_h = np.zeros(K, np.float32); alpha_h = np.zeros(K, np.float32)
+    loss_hist = np.zeros(K, np.float32)        # 训练端均值（参考）
+    acc_hist  = np.zeros(K, np.float32)        # 测试集 acc
+    entropy_hist = np.zeros(K, np.float32)     # 测试集交叉熵（Fig.2 用）
     selcnt_h = np.zeros(K, np.int32)
     bits_up_cum = np.zeros(K, np.float64); bits_down_cum = np.zeros(K, np.float64)
     cum_up = 0.0; cum_down = 0.0
 
+    # ---------- loop ----------
     for k in range(K):
-        # ---- 维护历史 Δθ 与历史强度 me_k ----
+        # 历史强度 me_k
         var = weights_to_vec(model.trainable_variables)
         if k > 0:
             dtheta = var - theta
             dtheta_hist = np.roll(dtheta_hist, 1, axis=1); dtheta_hist[:, 0] = dtheta
         theta = var
-        # 历史强度：me_k = Σ_d ksi[d,k] * ||Δθ_{k-d}||^2
-        me_k = 0.0
-        col_limit = min(k, D)            # 可用的历史列数
-        kk = min(k, D)
+        me_k = 0.0; col_limit = min(k, D); kk = min(k, D)
         for d in range(col_limit):
-            col = dtheta_hist[:, d]
-            me_k += float(ksi[d, kk] * (col @ col))
+            col = dtheta_hist[:, d]; me_k += float(ksi[d, kk] * (col @ col))
 
-        # ---- 快照全局权重（用于下发 & 回滚）----
         w_global = var.copy()
-
-        # ---- 本轮统计 ----
         train_acc = tf.keras.metrics.SparseCategoricalAccuracy()
-        loss_round = 0.0
-        grads_tpl = None
+        loss_round = 0.0; grads_tpl = None
 
-        # 候选集缓存
+        # 候选缓存
         cand_idx, cand_vec, cand_gain, cand_cost = [], [], [], []
-        cand_q_for_ref = []  # 仅 bbit/bin：若入选则写回 ref_up
+        cand_q_for_ref = []
         cos_list, rmse_list, alpha_list = [], [], []
 
-        # ---- 遍历所有客户端：生成候选（先过门限，再进入预算选择）----
+        # ——遍历客户端：产生候选（门限筛选）——
         for m in range(M):
-            # 下行参数量化（广播）
+            # 下发用于本地计算；比特记账稍后按“被选数”统计
             if b_down > 0:
                 w_down = quantd(w_global, ref_down[m], b=b_down)
-                ref_down[m] = w_down
-                vec_to_weights(w_down, model.trainable_variables)
-                cum_down += b_down * nv
+                ref_down[m] = w_down; vec_to_weights(w_down, model.trainable_variables)
             else:
                 vec_to_weights(w_global, model.trainable_variables)
-                cum_down += 32 * nv
 
-            # 前向/反向
             x, y = next(trains[m])
             with tf.GradientTape() as tape:
                 logits = model(x, training=True)
                 train_acc.update_state(y, logits)
-                ce = tf.reduce_mean(
-                    tf.keras.losses.sparse_categorical_crossentropy(y, logits, from_logits=True)
-                )
+                ce = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(
+                    y, logits, from_logits=True))
                 l2 = sum([args.cl * tf.nn.l2_loss(v) for v in model.trainable_variables])
                 loss = ce + l2
             grads = tape.gradient(loss, model.trainable_variables)
@@ -372,116 +365,106 @@ def run(args):
                 diff = g - ref_up[m]
                 if b_up == 1:
                     alpha_list.append(float(np.mean(np.abs(diff))))
-                q = quantd(g, ref_up[m], b=b_up)          # 去量化后的量化梯度
-                # 量化误差与方向
+                q = quantd(g, ref_up[m], b=b_up)
                 e[m] = float(np.dot(q - g, q - g))
                 denom = (np.linalg.norm(g) * np.linalg.norm(q) + 1e-12)
                 cos_list.append(float(np.dot(g, q) / denom))
-                rmse_list.append(float(math.sqrt(np.mean((g - q) ** 2))))
-                # 创新量
-                dL = q - ref_up[m]
-                gain = float(np.dot(dL, dL))
-                # 门限：历史强度 + 量化误差项
+                rmse_list.append(float(np.sqrt(np.mean((g - q) ** 2))))
+                dL = q - ref_up[m]; gain = float(np.dot(dL, dL))
                 rhs = (me_k / (alpha_lr * alpha_lr * M * M)) + 3.0 * (e[m] + ehat[m])
                 pass_thr = (gain >= thr_scale * rhs) or (k < warmup) or (clock[m] >= C)
                 if pass_thr:
-                    cand_idx.append(m)
-                    cand_vec.append(q)
-                    cand_q_for_ref.append(q)
-                    cand_gain.append(gain)
-                    cand_cost.append(b_up * nv)
-                # 否则仅累积时钟，先不进入候选
-            if mode in ["laq8"]:
-                q = laq_quantize_stochastic(g, k=8)
-                # 诊断
-                denom = (np.linalg.norm(g)*np.linalg.norm(q) + 1e-12)
-                cos_list.append(float(np.dot(g, q)/denom))
-                rmse_list.append(float(np.sqrt(np.mean((g - q)**2))))
-                # 成本与收益（与 fedavg 一致，用 ||g||^2）
-                cost_bits = 8 * nv
-                gain = float(np.dot(g, g))
+                    cand_idx.append(m); cand_vec.append(q); cand_q_for_ref.append(q)
+                    cand_gain.append(gain); cand_cost.append(b_up * nv)
+            elif mode == "laq8":
+                q = laq_quantize_stochastic(g, k=8)          # 向量级动态缩放
+                denom = (np.linalg.norm(g) * np.linalg.norm(q) + 1e-12)
+                cos_list.append(float(np.dot(g, q) / denom))
+                rmse_list.append(float(np.sqrt(np.mean((g - q) ** 2))))
+                gain = float(np.dot(g, g)); cost_bits = 8 * nv
                 cand_idx.append(m); cand_vec.append(q); cand_q_for_ref.append(None)
                 cand_gain.append(gain); cand_cost.append(cost_bits)
-            else:
-                # FedAvg：无量化门限（可选同样门限，用 ||g||^2 与 e=0）
-                gain = float(np.dot(g, g))
-                cand_idx.append(m)
-                cand_vec.append(g)
-                cand_q_for_ref.append(ref_up[m])  # 不改 ref
-                cand_gain.append(gain)
-                cand_cost.append(32 * nv)
+            else:  # fedavg
+                gain = float(np.dot(g, g)); cost_bits = 32 * nv
+                cand_idx.append(m); cand_vec.append(g); cand_q_for_ref.append(None)
+                cand_gain.append(gain); cand_cost.append(cost_bits)
 
-        # 回滚全局权重，避免被任一 w_down 残留影响
+        # 回滚全局权重
         vec_to_weights(w_global, model.trainable_variables)
 
-        # ---- 选择：在预算内选收益/成本高的子集 ----
+        # ——选择：在预算内选收益/成本高的子集——
         order = np.argsort(np.array(cand_gain) / (np.array(cand_cost) + 1e-12))[::-1]
         selected = []
         if sel_clients > 0:
             selected = list(order[:min(sel_clients, len(order))])
-            cost_bits = sum(cand_cost[i] for i in selected)
         elif up_budget_bits > 0.0:
             budget = up_budget_bits
             for i in order:
                 if cand_cost[i] <= budget:
                     selected.append(i); budget -= cand_cost[i]
-            cost_bits = up_budget_bits - budget
         else:
-            selected = list(order)  # 全选候选
-            cost_bits = sum(cand_cost[i] for i in selected)
+            selected = list(order)
 
-        # ---- 聚合与写回状态：仅对入选者 ----
+        # ——聚合与状态更新——
+        bits_up_this = 0.0
         if len(selected) > 0:
             agg = np.zeros(nv, np.float32)
             for i in selected:
-                m = cand_idx[i]
                 agg += cand_vec[i]
+                bits_up_this += cand_cost[i]
+                m = cand_idx[i]
                 if mode in ["bbit", "bin"]:
-                    ref_up[m] = cand_q_for_ref[i]   # 更新参考
-                    ehat[m]  = e[m]                 # 记忆误差
+                    ref_up[m] = cand_q_for_ref[i]
+                    ehat[m]  = e[m]
                     clock[m] = 0
                 else:
                     clock[m] = 0
             g_hat = agg / float(len(selected))
             cc = vectograd(g_hat, grads_tpl)
             optimizer.apply_gradients(zip(cc, model.trainable_variables))
-        # 未入选者：仅时钟 +1
+
+        # 未选
         not_sel = set(range(M)) - set(cand_idx[i] for i in selected)
         for m in not_sel:
             clock[m] = min(clock[m] + 1, C + 1)
 
-        # ---- 统计与打印 ----
-        cum_up += float(cost_bits)
-        loss_hist[k] = loss_round
-        acc_hist[k]  = float(train_acc.result().numpy())
-        selcnt_h[k]  = len(selected)
+        # ——比特记账：下发只按“选中数”计（与论文口径一致）——
+        selcnt = len(selected)
+        bits_down_this = (b_down if b_down > 0 else 32) * nv * selcnt
+        cum_up += bits_up_this; cum_down += bits_down_this
+
+        # ——测试集交叉熵与精度（统一 Fig.2 口径）——
+        test_acc = tf.keras.metrics.SparseCategoricalAccuracy()
+        entropy_sum = 0.0; ntest = 0
+        for xi, yi in Datate:
+            logits = model(xi, training=False)
+            test_acc.update_state(yi, logits)
+            ent = tf.reduce_sum(tf.keras.losses.sparse_categorical_crossentropy(
+                yi, logits, from_logits=True)).numpy()
+            entropy_sum += float(ent); ntest += int(yi.shape[0])
+        entropy = entropy_sum / max(1, ntest)
+
+        # ——日志写入——
+        loss_hist[k]    = loss_round
+        acc_hist[k]     = float(test_acc.result().numpy())
+        entropy_hist[k] = float(entropy)
+        selcnt_h[k]     = selcnt
         bits_up_cum[k]   = cum_up
         bits_down_cum[k] = cum_down
-        if len(cos_list):
-            cos_mean_h[k] = float(np.mean(cos_list))
-            cos_min_h[k]  = float(np.min(cos_list))
-            rmse_h[k]     = float(np.mean(rmse_list))
-            if b_up == 1 and len(alpha_list): alpha_h[k] = float(np.mean(alpha_list))
 
+        # 打印
         extra = ""
         if len(cos_list):
-            extra = f" | cosμ={cos_mean_h[k]:.3f} cosmin={cos_min_h[k]:.3f} rmseμ={rmse_h[k]:.4f}"
-            if b_up == 1 and len(alpha_list): extra += f" αμ={alpha_h[k]:.4f}"
-        print(f"[{k+1}/{K}] acc={acc_hist[k]:.4f} loss={loss_hist[k]:.4f} "
-              f"sel={selcnt_h[k]}/{len(cand_idx)}/{M}{extra} | bits↑Σ={bits_up_cum[k]:.2e} bits↓Σ={bits_down_cum[k]:.2e}")
+            extra = f" | cosμ={np.mean(cos_list):.3f} rmseμ={np.mean(rmse_list):.4f}"
+            if mode == "bin" and len(alpha_list): extra += f" αμ={np.mean(alpha_list):.4f}"
+        print(f"[{k+1}/{K}] acc={acc_hist[k]:.4f} entropy={entropy_hist[k]:.4f} "
+              f"sel={selcnt}/{len(cand_idx)}/{M}{extra} | bits↑Σ={cum_up:.2e} bits↓Σ={cum_down:.2e}")
 
-    # ---------- eval ----------
-    acc = tf.keras.metrics.SparseCategoricalAccuracy()
-    for xi, yi in Datate:
-        acc.update_state(yi, model(xi, training=False))
-    print(f"Test accuracy: {acc.result().numpy():.4f}")
-
+    # ——返回历史——
     return {
-        "loss": loss_hist, "acc": acc_hist, "selcnt": selcnt_h,
-        "cos_mean": cos_mean_h, "cos_min": cos_min_h, "rmse": rmse_h, "alpha": alpha_h,
-        "bits_up_cum": bits_up_cum, "bits_down_cum": bits_down_cum
+        "loss": loss_hist, "acc": acc_hist, "entropy": entropy_hist,
+        "selcnt": selcnt_h, "bits_up_cum": bits_up_cum, "bits_down_cum": bits_down_cum
     }
-
 
 
 # ------------------------- main -------------------------
