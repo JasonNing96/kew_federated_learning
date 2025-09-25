@@ -1,0 +1,58 @@
+{
+  "_comment": "FLQ 联邦学习配置文件 - 针对 Jetson Nano 优化",
+  
+  "system": {
+    "total_workers": 4,
+    "min_workers": 2,
+    "max_rounds": 1000,
+    "master_url": "http://192.168.1.100:5000"
+  },
+  
+  "dataset": {
+    "name": "fmnist",
+    "batch_size": 32,
+    "partition": "non_iid",
+    "dir_alpha": 0.1
+  },
+  
+  "model": {
+    "lr": 0.001,
+    "l2": 0.0005,
+    "local_epochs": 1
+  },
+  
+  "flq_algorithm": {
+    "mode": "laq8",
+    "b_up": 8,
+    "b_down": 8,
+    "clip_global": 0.0,
+    "scale_by_selected": true,
+    "sel_ref": 1.0
+  },
+  
+  "lazy_selection": {
+    "D": 10,
+    "ck": 0.8,
+    "C": 50,
+    "warmup": 10,
+    "thr_scale": 1.0
+  },
+  
+  "budget_selection": {
+    "sel_clients": 0,
+    "up_budget_bits": 17000000.0
+  },
+  
+  "jetson_optimization": {
+    "gpu_memory_limit_mb": 2048,
+    "enable_mixed_precision": false,
+    "prefetch_size": 2,
+    "num_parallel_calls": 2
+  },
+  
+  "logging": {
+    "log_level": "INFO",
+    "save_results": true,
+    "result_dir": "./results"
+  }
+}

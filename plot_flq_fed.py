@@ -250,15 +250,15 @@ def main():
             excel_map[key] = path
 
     # ---- Fig.2：迭代轮次 vs 交叉熵 ----
-    if excel_map:
-        fig2, _ = draw_paper_fig2_iter(
-            excel_map, max_iter=args.max_iter,
-            smooth_win=args.smooth_win, smooth_ema=args.smooth_ema,
-            legend_size=args.legend_size, line_width=args.line_width
-        )
-        out2 = f"Fig2_{args.dataset}.png"
-        if args.save: fig2.savefig(out2, dpi=300); print(f"[save] {out2}")
-        else: plt.show()
+    # if excel_map:
+    #     fig2, _ = draw_paper_fig2_iter(
+    #         excel_map, max_iter=args.max_iter,
+    #         smooth_win=args.smooth_win, smooth_ema=args.smooth_ema,
+    #         legend_size=args.legend_size, line_width=args.line_width
+    #     )
+    #     out2 = f"Fig2_{args.dataset}.png"
+    #     if args.save: fig2.savefig(out2, dpi=300); print(f"[save] {out2}")
+    #     else: plt.show()
 
     # ---- Fig.3：通信中的二值量化结果（可选，需要 bin 的 Excel）----
     if args.do_fig3 and ("bin" in excel_map):
