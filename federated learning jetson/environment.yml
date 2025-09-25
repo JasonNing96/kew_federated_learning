@@ -1,0 +1,73 @@
+# FLQ 联邦学习 - Jetson Nano 专用 Conda 环境配置
+# 适配 Jetson Nano 的 CUDA 和 TensorFlow 版本
+
+name: fed
+
+channels:
+  - conda-forge
+  - nvidia
+  - defaults
+
+dependencies:
+  # Python 核心
+  - python=3.9.16
+  
+  # 数值计算库
+  - numpy=1.21.0           # 与 TensorFlow 兼容的版本
+  - scipy=1.9.3
+  - pandas=1.5.3
+  - openpyxl=3.0.10        # Excel 文件支持
+  
+  # 网络和通信
+  - flask=2.2.3
+  - requests=2.28.2
+  
+  # 绘图和可视化
+  - matplotlib=3.6.3
+  - seaborn=0.12.2
+  
+  # Jetson Nano CUDA 支持
+  - cudatoolkit=11.2       # Jetson Nano 支持的 CUDA 版本
+  - cudnn=8.1.0
+  
+  # 系统工具
+  - psutil=5.9.4           # 系统监控
+  - tqdm=4.64.1            # 进度条
+  
+  # pip 安装的包
+  - pip=23.0.1
+  - pip:
+    # TensorFlow for Jetson
+    # 注意：Jetson Nano 需要使用专门编译的 TensorFlow 版本
+    # 建议从 NVIDIA 官方源安装或使用预编译的 wheel
+    - tensorflow==2.12.0
+    
+    # 额外的 Python 包
+    - tensorboard==2.12.0
+    - protobuf==3.19.6     # 避免版本冲突
+    - grpcio==1.48.2       # gRPC 支持
+    - h5py==3.7.0          # HDF5 文件格式
+    - pillow==9.4.0        # 图像处理
+    - scikit-learn==1.2.1  # 机器学习工具
+    - argparse             # 命令行参数解析
+
+# 环境变量设置
+variables:
+  # CUDA 环境变量
+  CUDA_HOME: /usr/local/cuda-11.4
+  CUDA_ROOT: /usr/local/cuda-11.4
+  LD_LIBRARY_PATH: /usr/local/cuda-11.4/lib64
+  
+  # TensorFlow 优化
+  TF_CPP_MIN_LOG_LEVEL: "2"
+  TF_FORCE_GPU_ALLOW_GROWTH: "true"
+  TF_GPU_MEMORY_LIMIT: "2048"
+  
+  # Jetson 专用优化
+  JETSON_MODEL_NAME: "NVIDIA Jetson Nano Developer Kit"
+  JETSON_CUDA_ARCH_BIN: "5.3"
+  
+  # 性能优化
+  OMP_NUM_THREADS: "4"
+  MKL_NUM_THREADS: "4"
+  NUMEXPR_NUM_THREADS: "4"

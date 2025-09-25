@@ -1,0 +1,29 @@
+# QGD = FedAvg：上行32b，下发32b；≈每轮1端
+python flq_fed_v3.py --dataset fmnist --mode fedavg --iters 800 --M 30 \
+  --batch 64 --lr 5e-4 --cl 5e-4 --seed 42 \
+  --partition non_iid --dir_alpha 0.1 \
+  --b_down 32 --sel_clients 0 --up_budget_bits 17000000 \
+  --thr_scale 0 --warmup 0 --C 1000000000
+
+# # LAQ（随机8b）：上行8b，下发32b；≈每轮4端
+# laq: --scale_by_selected 0
+  python flq_fed_v3.py --dataset fmnist --partition non_iid --dir_alpha 0.1 \
+  --iters 800 --M 20 --batch 64 --lr 0.5e-3 --cl 5e-4 --seed 42 \
+  --sel_clients 0 --up_budget_bits 17000000 --thr_scale 0 --warmup 0 --C 1000000000  --mode laq8 --b_down 32 --scale_by_selected 0 --sel_ref 1 --clip_global 0.5
+
+# FLQ(Ours) = bbit：上行8b，下发8b；≈ 每轮9端
+python flq_fed_v3.py --dataset fmnist --partition non_iid --dir_alpha 0.1 \
+  --iters 800 --M 20 --batch 64 --lr 0.5e-3 --cl 5e-4 --seed 42 \
+  --sel_clients 0 --up_budget_bits 17000000 --thr_scale 0 --warmup 0 --C 1000000000  --mode bbit --b 8 --b_down 8 --clip_global 1.0
+
+
+# bin 模式 
+python flq_fed_v3.py --dataset fmnist --partition non_iid --dir_alpha 0.1 \
+  --iters 800 --M 20 --batch 64 --lr 0.5e-3 --cl 5e-4 --seed 42 \
+  --sel_clients 0 --up_budget_bits 17000000 --thr_scale 0 --warmup 0 --C 1000000000  --mode bin --b_down 8 --clip_global 1.0
+
+# plot result
+python plot_flq_fed.py --excel_dir . --dataset fmnist --modes fedavg laq8 bbit --prefix results --max_iter 800 --save
+
+# bin binary anlysis
+python plot_flq_fed.py --excel_dir . --dataset fmnist --modes bin --save

@@ -107,21 +107,48 @@ def draw_paper_fig2_iter(excel_map, max_iter=800, smooth_win=9, smooth_ema=0.0,
     return fig, ax
 
 # ===== 论文 Fig.3：通信中的二值量化结果 =====
+# def draw_paper_fig3_binary(excel_path: str, mode_key="bin", max_comm=200):
+#     # 读取训练时记录的比特流（需要 v3 日志）
+#     df = pd.read_excel(excel_path, sheet_name=f"bin_{mode_key}")
+#     if max_comm is not None:
+#         df = df.iloc[:max_comm]
+#     x = df["comm"].to_numpy()
+#     y = df["bit"].to_numpy()
+
+#     fig, ax = plt.subplots(figsize=(7.2, 4.0))
+#     ax.scatter(x, y, s=12, marker='o')               # 蓝点
+#     ax.hlines(0.5, x.min(), x.max(), colors='r', linewidth=1.8)  # 0.5 参考线
+#     ax.set_xlabel("通信轮次", fontweight='bold')
+#     ax.set_ylabel("二值取值", fontweight='bold')
+#     ax.set_ylim(-0.05, 1.05)
+#     ax.set_xlim(x.min(), x.max())
+#     ax.tick_params(labelsize=12, width=1.8)
+#     for lab in ax.get_xticklabels()+ax.get_yticklabels(): lab.set_fontweight('bold')
+#     fig.tight_layout()
+#     return fig, ax
+
 def draw_paper_fig3_binary(excel_path: str, mode_key="bin", max_comm=200):
-    # 读取训练时记录的比特流（需要 v3 日志）
+    import pandas as pd, numpy as np, matplotlib.pyplot as plt
     df = pd.read_excel(excel_path, sheet_name=f"bin_{mode_key}")
     if max_comm is not None:
         df = df.iloc[:max_comm]
     x = df["comm"].to_numpy()
-    y = df["bit"].to_numpy()
+    y = df["bit"].to_numpy().astype(np.float32)
 
     fig, ax = plt.subplots(figsize=(7.2, 4.0))
-    ax.scatter(x, y, s=12, marker='o')               # 蓝点
-    ax.hlines(0.5, x.min(), x.max(), colors='r', linewidth=1.8)  # 0.5 参考线
+    # 先画所有列的 0→0.5 浅灰梳状线
+    ax.vlines(x, 0.0, 0.5, colors='0.85', linewidth=1.0, zorder=1)
+    # 对 bit==1 的列，补画 0.5→1.0 深灰梳状线
+    idx1 = (y >= 0.5)
+    ax.vlines(x[idx1], 0.5, 1.0, colors='0.6', linewidth=1.2, zorder=2)
+    # 顶部散点
+    ax.scatter(x, y, s=16, zorder=3)
+    # 中位线
+    ax.hlines(0.5, x.min(), x.max(), colors='r', linewidth=2.0, zorder=0)
+
     ax.set_xlabel("通信轮次", fontweight='bold')
     ax.set_ylabel("二值取值", fontweight='bold')
-    ax.set_ylim(-0.05, 1.05)
-    ax.set_xlim(x.min(), x.max())
+    ax.set_ylim(-0.05, 1.05); ax.set_xlim(x.min(), x.max())
     ax.tick_params(labelsize=12, width=1.8)
     for lab in ax.get_xticklabels()+ax.get_yticklabels(): lab.set_fontweight('bold')
     fig.tight_layout()

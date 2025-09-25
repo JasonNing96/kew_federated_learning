@@ -220,6 +220,7 @@ def build_model(l2: float, lr: float):
 # ------------------------- training -------------------------
 def run(args):
     # ----- 数据 -----
+    j_star = None   # Fig.3 观察的坐标
     part  = getattr(args, "partition", "iid").lower()
     alpha = float(getattr(args, "dir_alpha", 0.3))
     if part == "iid":
@@ -250,18 +251,18 @@ def run(args):
     sel_clients    = int(getattr(args, "sel_clients", 0))         # >0 固定选端
     up_budget_bits = float(getattr(args, "up_budget_bits", 0.0))  # >0 按预算贪心
 
-    # 新增：按被选端放大步长
+    # 按被选端放大步长
     scale_by_selected = bool(int(getattr(args, "scale_by_selected", 1)))
     sel_ref           = float(getattr(args, "sel_ref", 1.0))
 
     # ----- 状态 -----
-    ref_up   = np.zeros((M, nv), np.float32)   # 上行“参考向量”
-    ref_down = np.zeros((M, nv), np.float32)   # 下行“参考向量”
+    ref_up   = np.zeros((M, nv), np.float32)   # 上行参考
+    ref_down = np.zeros((M, nv), np.float32)   # 下行参考
     ef_res   = np.zeros((M, nv), np.float32)   # 误差补偿
     theta = np.zeros(nv, np.float32)
     dtheta_hist = np.zeros((nv, D), np.float32)
 
-    # 历史能量权重 ksi[d,kk]（保持与你的 v3 一致）
+    # 历史能量权重
     ksi = np.zeros((D, D+1), np.float32)
     for d in range(D):
         ksi[d, 0] = 1.0
@@ -278,6 +279,9 @@ def run(args):
     selcnt_h = np.zeros(K, np.int32)
     bits_up_cum = np.zeros(K, np.float64); bits_down_cum = np.zeros(K, np.float64)
     cum_up = 0.0; cum_down = 0.0
+
+    # Fig3 用：每轮 1 个二值位（仅 bin 模式有效）
+    bin_series = []
 
     for k in range(K):
         # 历史能量 me_k
@@ -300,7 +304,7 @@ def run(args):
 
         # ---------- 本地计算与候选构建 ----------
         for m in range(M):
-            # 下发：仅对被选集合计费，但为简单先发给所有端；若希望更严谨，可在选后再发
+            # 广播（已实现低比特下发）
             if b_down > 0:
                 w_down = quant_rel_per_tensor(w_global, ref_down[m], b_down, shapes)
                 ref_down[m] = w_down; vec_to_weights(w_down, model.trainable_variables)
@@ -331,8 +335,7 @@ def run(args):
                     cand_gain.append(float(np.dot(q, q)))
                     cand_cost.append(b_up * nv)
             elif mode == "laq8":
-                # q = laq_per_tensor(g, 8, shapes)
-                q = laq_per_vector(g, 8)
+                q = laq_per_vector(g, 8)  # LAQ：整向量缩放
                 q_buf[m] = q
                 cand_idx.append(m); cand_gain.append(float(np.dot(q, q))); cand_cost.append(8 * nv)
             else:  # fedavg
@@ -355,7 +358,37 @@ def run(args):
         else:
             selected = list(order)
 
-        # ---------- 聚合、按被选端放大步长、更新 ----------
+        # ---------- Fig3：记录本轮 1 个二值位（仅 bin） ----------
+        # if mode == "bin":
+        #     if len(selected) > 0:
+        #         m0 = cand_idx[selected[0]]
+        #         # 取该端“相对更新”的第 0 维的符号，映射到 {0,1}
+        #         diff0 = (q_buf[m0] - ref_up[m0])[0]
+        #         bin_series.append(1 if diff0 >= 0 else 0)
+        #     else:
+        #         bin_series.append(bin_series[-1] if bin_series else 0)
+        
+        if mode == "bin":
+            if len(selected) > 0:
+                # 本轮聚合前的“候选和”，用于选 j*
+                agg_tmp = np.zeros(nv, np.float32)
+                for idx in selected:
+                    m = cand_idx[idx]; agg_tmp += q_buf[m]
+                if j_star is None:
+                    j_star = int(np.argmax(np.abs(agg_tmp)))  # 第一次确定后固定
+
+                # 多数表决：看被选端在 j* 的相对更新符号
+                votes = []
+                for idx in selected:
+                    m = cand_idx[idx]
+                    diff_j = (q_buf[m][j_star] - ref_up[m][j_star])
+                    votes.append(1.0 if diff_j >= 0.0 else -1.0)
+                b = 1 if (np.mean(votes) >= 0.0) else 0
+                bin_series.append(b)
+            else:
+                bin_series.append(bin_series[-1] if bin_series else 0)
+
+        # ---------- 聚合与更新 ----------
         bits_up_this = 0.0
         if len(selected) > 0:
             agg = np.zeros(nv, np.float32)
@@ -370,7 +403,6 @@ def run(args):
 
             m_sel = float(len(selected))
             g_hat = agg / max(1.0, m_sel)
-            # 关键修改：按被选端数放大步长
             scale_sel = (m_sel / max(1.0, sel_ref)) if scale_by_selected else 1.0
             cc = vectograd(g_hat * scale_sel, grads_tpl)
 
@@ -381,7 +413,7 @@ def run(args):
                     cc = [gi * s for gi in cc]
             optimizer.apply_gradients(zip(cc, model.trainable_variables))
 
-        # 未选端的 EF 与时钟
+        # 未选端
         picked = set(cand_idx[i] for i in selected)
         for m in range(M):
             if m in picked: continue
@@ -389,7 +421,7 @@ def run(args):
                 ef_res[m] = g_eff_buf[m]
             clock[m] = min(clock[m] + 1, C + 1)
 
-        # ----- 比特统计：仅对被选端计下行 -----
+        # ----- 比特统计 -----
         selcnt = len(selected)
         bits_down_this = (b_down if b_down > 0 else 32) * nv * selcnt
         cum_up += bits_up_this; cum_down += bits_down_this
@@ -414,13 +446,14 @@ def run(args):
         bits_down_cum[k] = cum_down
 
         print(f"[{k+1}/{K}] acc={acc_hist[k]:.4f} entropy={entropy_hist[k]:.4f} "
-              f"sel={selcnt}/{len(cand_idx)}/{M} scale×={(m_sel if selcnt>0 else 0)/max(1.0, sel_ref):.2f} "
-              f"| bits↑Σ={cum_up:.2e} bits↓Σ={cum_down:.2e}")
+              f"sel={selcnt}/{len(cand_idx)}/{M} | bits↑Σ={cum_up:.2e} bits↓Σ={cum_down:.2e}")
 
     return {
         "loss": loss_hist, "acc": acc_hist, "entropy": entropy_hist,
-        "selcnt": selcnt_h, "bits_up_cum": bits_up_cum, "bits_down_cum": bits_down_cum
+        "selcnt": selcnt_h, "bits_up_cum": bits_up_cum, "bits_down_cum": bits_down_cum,
+        "bin_series": np.array(bin_series, dtype=np.int8) if mode == "bin" else None
     }
+
 
 
 # ------------------------- main -------------------------
