@@ -261,25 +261,25 @@ def main():
         else: plt.show()
 
     # ---- Fig.3：通信中的二值量化结果（可选，需要 bin 的 Excel）----
-    # if args.do_fig3 and ("bin" in excel_map):
-    #     fig3, _ = draw_paper_fig3_binary(excel_map["bin"], mode_key="bin", max_comm=args.fig3_max_comm)
-    #     out3 = f"Fig3_{args.dataset}.png"
-    #     if args.save: fig3.savefig(out3, dpi=300); print(f"[save] {out3}")
-    #     else: plt.show()
+    if args.do_fig3 and ("bin" in excel_map):
+        fig3, _ = draw_paper_fig3_binary(excel_map["bin"], mode_key="bin", max_comm=args.fig3_max_comm)
+        out3 = f"Fig3_{args.dataset}.png"
+        if args.save: fig3.savefig(out3, dpi=300); print(f"[save] {out3}")
+        else: plt.show()
 
     # ---- Fig.4：直接在 main 里调用 draw_paper_fig4_quant_controlled ----
-    ks = [int(s) for s in args.fig4_k.split(",") if s.strip()]
-    figs = draw_paper_fig4_quant_controlled(
-        ks=tuple(ks),
-        d=args.fig4_d, n=args.fig4_n,
-        r_max=args.fig4_rmax, sigma=args.fig4_sigma,
-        seed=args.seed
-    )
-    # 分别保存 k=... 的子图
-    for k, (fig, _) in zip(ks, figs):
-        out4 = f"Fig4_k{k}_{args.dataset}.png"
-        if args.save: fig.savefig(out4, dpi=300); print(f"[save] {out4}")
-        else: plt.show()
+    # ks = [int(s) for s in args.fig4_k.split(",") if s.strip()]
+    # figs = draw_paper_fig4_quant_controlled(
+    #     ks=tuple(ks),
+    #     d=args.fig4_d, n=args.fig4_n,
+    #     r_max=args.fig4_rmax, sigma=args.fig4_sigma,
+    #     seed=args.seed
+    # )
+    # # 分别保存 k=... 的子图
+    # for k, (fig, _) in zip(ks, figs):
+    #     out4 = f"Fig4_k{k}_{args.dataset}.png"
+    #     if args.save: fig.savefig(out4, dpi=300); print(f"[save] {out4}")
+    #     else: plt.show()
 
 
 if __name__ == "__main__":

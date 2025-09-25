@@ -12,6 +12,15 @@ if gpus:
         print(f"已配置GPU内存增长: {len(gpus)}个GPU")
     except RuntimeError as e:
         print(f"GPU配置错误: {e}")
+        
+def laq_per_vector(g_vec: np.ndarray, k: int) -> np.ndarray:
+    L = float(2**(k-1) - 1)
+    s = (np.max(np.abs(g_vec)) + 1e-12) / L
+    y = g_vec / s
+    low = np.floor(y); p = y - low
+    rnd = (np.random.rand(*y.shape) < p).astype(np.float32)
+    q = np.clip(low + rnd, -L, L) * s
+    return q.astype(np.float32)
 # ------------------------- I/O -------------------------
 def save_excel_data(outfile: str, mode: str, history: dict,
                     bin_series: np.ndarray | None = None,
@@ -210,8 +219,7 @@ def build_model(l2: float, lr: float):
 
 # ------------------------- training -------------------------
 def run(args):
-    bin_series = []
-    # data
+    # ----- 数据 -----
     part  = getattr(args, "partition", "iid").lower()
     alpha = float(getattr(args, "dir_alpha", 0.3))
     if part == "iid":
@@ -220,42 +228,50 @@ def run(args):
         Datatr, Datate = make_federated_non_iid(args.dataset, args.M, args.batch, alpha=alpha, seed=args.seed)
     trains = [iter(ds) for ds in Datatr]
 
-    # model
+    # ----- 模型 -----
     model, optimizer = build_model(l2=args.cl, lr=args.lr)
     shapes = [tuple(v.shape) for v in model.trainable_variables]
     nv = sum(int(np.prod(s)) for s in shapes)
 
-    # meta
+    # ----- 超参与模式 -----
     M = int(args.M); K = int(args.iters)
-    mode   = args.mode.lower()                           # "fedavg" | "bbit" | "bin" | "laq8"
+    mode   = getattr(args, "mode", "bbit").lower()          # fedavg | bbit | bin | laq8
     b_up   = 1 if mode == "bin" else int(getattr(args, "b", 8))
     b_down = int(getattr(args, "b_down", 0))
-    if b_down in (0, 32): b_down = 0                    # 0/32 -> 全精度直发
+    if b_down in (0, 32): b_down = 0                        # 0/32 -> 全精度直发
 
-    # lazy
+    # 懒惰相关（保持原逻辑）
     D = int(getattr(args, "D", 10)); ck = float(getattr(args, "ck", 0.8))
     C = int(getattr(args, "C", 50)); warmup = int(getattr(args, "warmup", 50))
     thr_scale = float(getattr(args, "thr_scale", 1.0))
     clip_global = float(getattr(args, "clip_global", 0.0))
 
-    # budget
-    sel_clients    = int(getattr(args, "sel_clients", 0))
-    up_budget_bits = float(getattr(args, "up_budget_bits", 0.0))
+    # 预算选择
+    sel_clients    = int(getattr(args, "sel_clients", 0))         # >0 固定选端
+    up_budget_bits = float(getattr(args, "up_budget_bits", 0.0))  # >0 按预算贪心
 
-    # states
-    ref_up   = np.zeros((M, nv), np.float32)
-    ref_down = np.zeros((M, nv), np.float32)
-    ef_res   = np.zeros((M, nv), np.float32)
+    # 新增：按被选端放大步长
+    scale_by_selected = bool(int(getattr(args, "scale_by_selected", 1)))
+    sel_ref           = float(getattr(args, "sel_ref", 1.0))
+
+    # ----- 状态 -----
+    ref_up   = np.zeros((M, nv), np.float32)   # 上行“参考向量”
+    ref_down = np.zeros((M, nv), np.float32)   # 下行“参考向量”
+    ef_res   = np.zeros((M, nv), np.float32)   # 误差补偿
     theta = np.zeros(nv, np.float32)
     dtheta_hist = np.zeros((nv, D), np.float32)
-    ksi = np.zeros((D, D + 1), np.float32)
+
+    # 历史能量权重 ksi[d,kk]（保持与你的 v3 一致）
+    ksi = np.zeros((D, D+1), np.float32)
     for d in range(D):
         ksi[d, 0] = 1.0
-        for k in range(1, D + 1): ksi[d, k] = 1.0 / float(d + 1)
+        for k in range(1, D+1):
+            ksi[d, k] = 1.0 / float(d + 1)
     ksi *= ck
+
     e = np.zeros(M, np.float32); ehat = np.zeros(M, np.float32); clock = np.zeros(M, np.int32)
 
-    # logs
+    # ----- 统计 -----
     loss_hist = np.zeros(K, np.float32)
     acc_hist  = np.zeros(K, np.float32)
     entropy_hist = np.zeros(K, np.float32)
@@ -264,7 +280,7 @@ def run(args):
     cum_up = 0.0; cum_down = 0.0
 
     for k in range(K):
-        # history energy
+        # 历史能量 me_k
         var = weights_to_vec(model.trainable_variables)
         if k > 0:
             dtheta = var - theta
@@ -278,13 +294,13 @@ def run(args):
         train_acc = tf.keras.metrics.SparseCategoricalAccuracy()
         loss_round = 0.0; grads_tpl = None
 
-        # buffers
+        # 本轮候选缓存
         g_eff_buf = [None]*M; q_buf = [None]*M
         cand_idx, cand_gain, cand_cost = [], [], []
 
-        # local compute -> candidates
+        # ---------- 本地计算与候选构建 ----------
         for m in range(M):
-            # downlink
+            # 下发：仅对被选集合计费，但为简单先发给所有端；若希望更严谨，可在选后再发
             if b_down > 0:
                 w_down = quant_rel_per_tensor(w_global, ref_down[m], b_down, shapes)
                 ref_down[m] = w_down; vec_to_weights(w_down, model.trainable_variables)
@@ -305,25 +321,28 @@ def run(args):
 
             if mode in ["bbit", "bin"]:
                 g_eff = g + ef_res[m]
-                q = quant_rel_per_tensor(g_eff, ref_up[m], b_up, shapes)  # 逐张量相对量化
+                q = quant_rel_per_tensor(g_eff, ref_up[m], b_up, shapes)
                 g_eff_buf[m] = g_eff; q_buf[m] = q
                 e[m] = float(np.dot(q - g_eff, q - g_eff))
                 rhs = (me_k / (args.lr * args.lr * M * M)) + 3.0 * (e[m] + ehat[m])
                 pass_thr = (float(np.dot(q, q)) >= thr_scale * rhs) or (k < warmup) or (clock[m] >= C)
                 if pass_thr:
-                    cand_idx.append(m); cand_gain.append(float(np.dot(q, q))); cand_cost.append(b_up * nv)
+                    cand_idx.append(m)
+                    cand_gain.append(float(np.dot(q, q)))
+                    cand_cost.append(b_up * nv)
             elif mode == "laq8":
-                q = laq_per_tensor(g, 8, shapes)                         # 逐张量 LAQ
+                # q = laq_per_tensor(g, 8, shapes)
+                q = laq_per_vector(g, 8)
                 q_buf[m] = q
                 cand_idx.append(m); cand_gain.append(float(np.dot(q, q))); cand_cost.append(8 * nv)
             else:  # fedavg
                 q = g; q_buf[m] = q
                 cand_idx.append(m); cand_gain.append(float(np.dot(q, q))); cand_cost.append(32 * nv)
 
-        # restore weights
+        # 还原全局权重
         vec_to_weights(w_global, model.trainable_variables)
 
-        # selection under budget
+        # ---------- 预算贪心选择 ----------
         order = np.argsort(np.array(cand_gain) / (np.array(cand_cost) + 1e-12))[::-1]
         selected = []
         if sel_clients > 0:
@@ -335,17 +354,8 @@ def run(args):
                     selected.append(i); budget -= cand_cost[i]
         else:
             selected = list(order)
-        
-        # save bin series
-        bit_this = np.nan
-        if args.mode.lower() == "bin" and len(selected) > 0:
-            m0 = cand_idx[selected[0]]
-            # 量化的“相对增量” q - ref 的符号就是上传比特
-            delta = q_buf[m0] - ref_up[m0]
-            bit_this = 1 if float(delta[0]) >= 0.0 else 0
-        bin_series.append(bit_this)
 
-        # aggregate and update states
+        # ---------- 聚合、按被选端放大步长、更新 ----------
         bits_up_this = 0.0
         if len(selected) > 0:
             agg = np.zeros(nv, np.float32)
@@ -354,19 +364,24 @@ def run(args):
                 agg += q; bits_up_this += cand_cost[idx]
                 if mode in ["bbit", "bin"]:
                     ref_up[m] = q
-                    ef_res[m] = g_eff_buf[m] - q    # EF 正确落地
+                    ef_res[m] = g_eff_buf[m] - q
                     ehat[m] = e[m]
                 clock[m] = 0
-            g_hat = agg / float(len(selected))
-            cc = vectograd(g_hat, grads_tpl)
+
+            m_sel = float(len(selected))
+            g_hat = agg / max(1.0, m_sel)
+            # 关键修改：按被选端数放大步长
+            scale_sel = (m_sel / max(1.0, sel_ref)) if scale_by_selected else 1.0
+            cc = vectograd(g_hat * scale_sel, grads_tpl)
+
             if clip_global > 0:
-                gnorm = np.sqrt(sum((gi**2).sum() for gi in cc))
+                gnorm = np.sqrt(sum(tf.reduce_sum(gi**2) for gi in cc))
                 if gnorm > clip_global:
-                    scale = clip_global / (gnorm + 1e-12)
-                    cc = [gi * scale for gi in cc]
+                    s = clip_global / (gnorm + 1e-12)
+                    cc = [gi * s for gi in cc]
             optimizer.apply_gradients(zip(cc, model.trainable_variables))
 
-        # EF for unselected
+        # 未选端的 EF 与时钟
         picked = set(cand_idx[i] for i in selected)
         for m in range(M):
             if m in picked: continue
@@ -374,12 +389,12 @@ def run(args):
                 ef_res[m] = g_eff_buf[m]
             clock[m] = min(clock[m] + 1, C + 1)
 
-        # bit accounting: downlink only for selected
+        # ----- 比特统计：仅对被选端计下行 -----
         selcnt = len(selected)
         bits_down_this = (b_down if b_down > 0 else 32) * nv * selcnt
         cum_up += bits_up_this; cum_down += bits_down_this
 
-        # test entropy and acc
+        # ----- 测试 -----
         test_acc = tf.keras.metrics.SparseCategoricalAccuracy()
         ent_sum = 0.0; ntest = 0
         for xi, yi in Datate:
@@ -390,7 +405,7 @@ def run(args):
             ent_sum += float(ent); ntest += int(yi.shape[0])
         entropy = ent_sum / max(1, ntest)
 
-        # logs
+        # ----- 记录与打印 -----
         loss_hist[k]    = loss_round
         acc_hist[k]     = float(test_acc.result().numpy())
         entropy_hist[k] = float(entropy)
@@ -399,13 +414,14 @@ def run(args):
         bits_down_cum[k] = cum_down
 
         print(f"[{k+1}/{K}] acc={acc_hist[k]:.4f} entropy={entropy_hist[k]:.4f} "
-              f"sel={selcnt}/{len(cand_idx)}/{M} | bits↑Σ={cum_up:.2e} bits↓Σ={cum_down:.2e}")
+              f"sel={selcnt}/{len(cand_idx)}/{M} scale×={(m_sel if selcnt>0 else 0)/max(1.0, sel_ref):.2f} "
+              f"| bits↑Σ={cum_up:.2e} bits↓Σ={cum_down:.2e}")
 
     return {
         "loss": loss_hist, "acc": acc_hist, "entropy": entropy_hist,
-        "selcnt": selcnt_h, "bits_up_cum": bits_up_cum, "bits_down_cum": bits_down_cum,
-        "bin_series": np.array(bin_series, dtype=np.float32)
+        "selcnt": selcnt_h, "bits_up_cum": bits_up_cum, "bits_down_cum": bits_down_cum
     }
+
 
 # ------------------------- main -------------------------
 def parse_args():
@@ -436,6 +452,10 @@ def parse_args():
     p.add_argument("--C", type=int, default=1000000000)
     p.add_argument("--warmup", type=int, default=0)
     p.add_argument("--thr_scale", type=float, default=0.0)
+    p.add_argument("--scale_by_selected", type=int, default=1,
+               help="按被选端数量放大步长")
+    p.add_argument("--sel_ref", type=float, default=1.0,
+               help="参考端数，默认为 1（等价于 LAQ 的规模）")
     return p.parse_args()
 
 if __name__ == "__main__":

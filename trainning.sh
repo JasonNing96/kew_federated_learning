@@ -75,9 +75,10 @@ python flq_fed_v3.py --dataset fmnist --partition non_iid --dir_alpha 0.1 \
 # acc = 0.86 loss = 0.37 4/20
   --mode bbit --b 8 --b_down 32
 
+# laq: --scale_by_selected 0
   python flq_fed_v3.py --dataset fmnist --partition non_iid --dir_alpha 0.1 \
   --iters 800 --M 20 --batch 64 --lr 0.5e-3 --cl 5e-4 --seed 42 \
-  --sel_clients 1 --up_budget_bits 0 --thr_scale 0 --warmup 0 --C 1000000000  --mode bbit --b 4 --b_down 32 
+  --sel_clients 0 --up_budget_bits 17000000 --thr_scale 0 --warmup 0 --C 1000000000  --mode laq8 --b_down 32 --scale_by_selected 0 --sel_ref 1 --clip_global 0.5
 # 
   --mode laq8 --b_down 32
 
