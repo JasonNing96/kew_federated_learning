@@ -19,16 +19,16 @@ import sys
 
 # ============= 配置参数 =============
 # 服务器地址（支持内网IP切换）
-SERVER = os.getenv("FL_SERVER", "http://127.0.0.1:8080")
+SERVER = os.getenv("FL_SERVER", "http://127.0.0.1:8087")
 
 # 客户端ID（从命令行参数或环境变量获取）
 CLIENT_ID = os.getenv("CLIENT_ID", sys.argv[1] if len(sys.argv) > 1 else "1")
 
 # 训练参数
-EPR = 1          # 快速测试用（CPU模式）
+EPR = 1          # 每轮本地训练epoch数
 IMGZ = 640       # 图像尺寸
-BATCH = 8       # 批次大小
-DEVICE = 'cpu'   # 使用CPU避免指令集问题
+BATCH = 8        # 批次大小
+DEVICE = 'cuda:0'  # 🔧 改用GPU（从CPU改为cuda:0，RTX 4090训练快20倍）
 
 # 数据配置
 DATA_YAML = f"client{CLIENT_ID}/oil.yaml"
@@ -148,7 +148,7 @@ def train_local(model: YOLO, round_id: int):
             project=RUNS_DIR,
             name=f"round_{round_id}",
             exist_ok=True,
-            verbose=False  # 关闭详细输出，减少日志混乱
+            verbose=True   # 🔧 改为True，显示训练进度
         )
 
         print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ 本地训练完成 (mAP50: {results.results_dict.get('metrics/mAP50(B)', 'N/A'):.3f})")

@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/home/njh/project/kew_federated_learning/fed_oil_demo/test_local_training.py", line 10, in <module>
+    from ultralytics import YOLO
+ModuleNotFoundError: No module named 'ultralytics'

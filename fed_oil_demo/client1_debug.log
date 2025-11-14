@@ -1,0 +1,77 @@
+[22:13:18] 🚀 启动联邦学习客户端 #1
+[22:13:18] 🌐 服务器地址: http://127.0.0.1:8080
+[22:13:18] 📊 数据配置: client1/oil.yaml
+[22:13:18] ⚙️  训练参数: EPR=1, IMGZ=640, BATCH=8, DEVICE=cuda:0
+============================================================
+[22:13:18] 📊 本地训练样本数: 1
+
+[22:13:18] 📦 初始化模型架构...
+Overriding model.yaml nc=80 with nc=2
+
+                   from  n    params  module                                       arguments                     
+  0                  -1  1       464  ultralytics.nn.modules.conv.Conv             [3, 16, 3, 2]                 
+  1                  -1  1      4672  ultralytics.nn.modules.conv.Conv             [16, 32, 3, 2]                
+  2                  -1  1      7360  ultralytics.nn.modules.block.C2f             [32, 32, 1, True]             
+  3                  -1  1     18560  ultralytics.nn.modules.conv.Conv             [32, 64, 3, 2]                
+  4                  -1  2     49664  ultralytics.nn.modules.block.C2f             [64, 64, 2, True]             
+  5                  -1  1     73984  ultralytics.nn.modules.conv.Conv             [64, 128, 3, 2]               
+  6                  -1  2    197632  ultralytics.nn.modules.block.C2f             [128, 128, 2, True]           
+  7                  -1  1    295424  ultralytics.nn.modules.conv.Conv             [128, 256, 3, 2]              
+  8                  -1  1    460288  ultralytics.nn.modules.block.C2f             [256, 256, 1, True]           
+  9                  -1  1    164608  ultralytics.nn.modules.block.SPPF            [256, 256, 5]                 
+ 10                  -1  1         0  torch.nn.modules.upsampling.Upsample         [None, 2, 'nearest']          
+ 11             [-1, 6]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 12                  -1  1    148224  ultralytics.nn.modules.block.C2f             [384, 128, 1]                 
+ 13                  -1  1         0  torch.nn.modules.upsampling.Upsample         [None, 2, 'nearest']          
+ 14             [-1, 4]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 15                  -1  1     37248  ultralytics.nn.modules.block.C2f             [192, 64, 1]                  
+ 16                  -1  1     36992  ultralytics.nn.modules.conv.Conv             [64, 64, 3, 2]                
+ 17            [-1, 12]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 18                  -1  1    123648  ultralytics.nn.modules.block.C2f             [192, 128, 1]                 
+ 19                  -1  1    147712  ultralytics.nn.modules.conv.Conv             [128, 128, 3, 2]              
+ 20             [-1, 9]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 21                  -1  1    493056  ultralytics.nn.modules.block.C2f             [384, 256, 1]                 
+ 22        [15, 18, 21]  1    751702  ultralytics.nn.modules.head.Detect           [2, [64, 128, 256]]           
+Model summary: 225 layers, 3,011,238 parameters, 3,011,222 gradients, 8.2 GFLOPs
+
+[22:13:18] ✅ 模型架构初始化完成 (nc=2)
+[22:13:18] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf658dc0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:18] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf658dc0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:18] 🔄 5秒后重试...
+[22:13:23] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5ee610>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:23] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5ee610>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:23] 🔄 5秒后重试...
+[22:13:28] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5eee20>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:28] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5eee20>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:28] 🔄 5秒后重试...
+[22:13:33] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf658a00>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:33] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf658a00>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:33] 🔄 5秒后重试...
+[22:13:38] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf6586d0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:38] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf6586d0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:38] 🔄 5秒后重试...
+[22:13:43] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5f8670>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:43] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5f8670>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:43] 🔄 5秒后重试...
+[22:13:48] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5f8e80>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:48] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5f8e80>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:48] 🔄 5秒后重试...
+[22:13:53] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5fe6d0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:53] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5fe6d0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:53] 🔄 5秒后重试...
+[22:13:58] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf6587f0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:58] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf6587f0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:13:58] 🔄 5秒后重试...
+[22:14:03] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5feb20>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:14:03] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5feb20>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:14:03] 🔄 5秒后重试...
+[22:14:08] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5fee20>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:14:08] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5fee20>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:14:08] 🔄 5秒后重试...
+[22:14:13] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5f8bb0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:14:13] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5f8bb0>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:14:13] 🔄 5秒后重试...
+[22:14:18] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5f8100>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:14:18] ❌ 错误: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5f8100>: Failed to establish a new connection: [Errno 111] Connection refused'))
+[22:14:18] 🔄 5秒后重试...
+[22:14:23] ❌ 拉取模型失败: HTTPConnectionPool(host='127.0.0.1', port=8080): Max retries exceeded with url: /global (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f8fdf5f36d0>: Failed to establish a new connection: [Errno 111] Connection refused'))

@@ -1,0 +1,252 @@
+[22:17:36] 🚀 初始化参数服务器...
+[22:17:36] 📦 加载基础模型: yolov8n.pt
+[22:17:36] 📊 数据配置: client1/oil.yaml
+[22:17:36] 🏷️  类别数: 2
+Overriding model.yaml nc=80 with nc=2
+
+                   from  n    params  module                                       arguments                     
+  0                  -1  1       464  ultralytics.nn.modules.conv.Conv             [3, 16, 3, 2]                 
+  1                  -1  1      4672  ultralytics.nn.modules.conv.Conv             [16, 32, 3, 2]                
+  2                  -1  1      7360  ultralytics.nn.modules.block.C2f             [32, 32, 1, True]             
+  3                  -1  1     18560  ultralytics.nn.modules.conv.Conv             [32, 64, 3, 2]                
+  4                  -1  2     49664  ultralytics.nn.modules.block.C2f             [64, 64, 2, True]             
+  5                  -1  1     73984  ultralytics.nn.modules.conv.Conv             [64, 128, 3, 2]               
+  6                  -1  2    197632  ultralytics.nn.modules.block.C2f             [128, 128, 2, True]           
+  7                  -1  1    295424  ultralytics.nn.modules.conv.Conv             [128, 256, 3, 2]              
+  8                  -1  1    460288  ultralytics.nn.modules.block.C2f             [256, 256, 1, True]           
+  9                  -1  1    164608  ultralytics.nn.modules.block.SPPF            [256, 256, 5]                 
+ 10                  -1  1         0  torch.nn.modules.upsampling.Upsample         [None, 2, 'nearest']          
+ 11             [-1, 6]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 12                  -1  1    148224  ultralytics.nn.modules.block.C2f             [384, 128, 1]                 
+ 13                  -1  1         0  torch.nn.modules.upsampling.Upsample         [None, 2, 'nearest']          
+ 14             [-1, 4]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 15                  -1  1     37248  ultralytics.nn.modules.block.C2f             [192, 64, 1]                  
+ 16                  -1  1     36992  ultralytics.nn.modules.conv.Conv             [64, 64, 3, 2]                
+ 17            [-1, 12]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 18                  -1  1    123648  ultralytics.nn.modules.block.C2f             [192, 128, 1]                 
+ 19                  -1  1    147712  ultralytics.nn.modules.conv.Conv             [128, 128, 3, 2]              
+ 20             [-1, 9]  1         0  ultralytics.nn.modules.conv.Concat           [1]                           
+ 21                  -1  1    493056  ultralytics.nn.modules.block.C2f             [384, 256, 1]                 
+ 22        [15, 18, 21]  1    751702  ultralytics.nn.modules.head.Detect           [2, [64, 128, 256]]           
+Model summary: 225 layers, 3,011,238 parameters, 3,011,222 gradients, 8.2 GFLOPs
+
+[22:17:36] ✅ 加载预训练权重: 319/355 层 (跳过36个输出层)
+[22:17:36] ✅ 服务器就绪，等待客户端连接...
+[22:17:36] 📊 配置: 3客户端/轮 × 2轮
+============================================================
+
+[22:17:36] 🌐 启动服务器: http://0.0.0.0:8080
+[22:17:36] 📡 支持内网多设备访问，使用内网IP:8080连接
+INFO:     Started server process [11867]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+[22:17:51] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:41318 - "GET /global HTTP/1.1" 200 OK
+[22:17:51] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:41330 - "GET /global HTTP/1.1" 200 OK
+[22:17:52] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:41332 - "GET /global HTTP/1.1" 200 OK
+[22:17:58] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:41398 - "GET /global HTTP/1.1" 200 OK
+[22:17:58] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:41430 - "GET /global HTTP/1.1" 200 OK
+[22:17:59] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:41442 - "GET /global HTTP/1.1" 200 OK
+[22:18:05] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:59156 - "GET /global HTTP/1.1" 200 OK
+[22:18:05] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:59176 - "GET /global HTTP/1.1" 200 OK
+[22:18:06] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:59202 - "GET /global HTTP/1.1" 200 OK
+[22:18:11] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:44940 - "GET /global HTTP/1.1" 200 OK
+[22:18:12] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:44962 - "GET /global HTTP/1.1" 200 OK
+[22:18:12] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:44968 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:44984 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:45050 - "GET / HTTP/1.1" 200 OK
+[22:18:18] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:45052 - "GET /global HTTP/1.1" 200 OK
+[22:18:19] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:45070 - "GET /global HTTP/1.1" 200 OK
+[22:18:19] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:45090 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52508 - "GET / HTTP/1.1" 200 OK
+[22:18:25] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:52530 - "GET /global HTTP/1.1" 200 OK
+[22:18:26] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:52558 - "GET /global HTTP/1.1" 200 OK
+[22:18:27] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:52574 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52584 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34302 - "GET / HTTP/1.1" 200 OK
+[22:18:34] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:34330 - "GET /global HTTP/1.1" 200 OK
+[22:18:35] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:34354 - "GET /global HTTP/1.1" 200 OK
+[22:18:36] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:34370 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:34382 - "GET / HTTP/1.1" 200 OK
+[22:18:41] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:47516 - "GET /global HTTP/1.1" 200 OK
+[22:18:42] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:47520 - "GET /global HTTP/1.1" 200 OK
+[22:18:43] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:47538 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47550 - "GET / HTTP/1.1" 200 OK
+[22:18:48] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:47616 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:47618 - "GET / HTTP/1.1" 200 OK
+[22:18:49] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:47632 - "GET /global HTTP/1.1" 200 OK
+[22:18:49] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:47642 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38810 - "GET / HTTP/1.1" 200 OK
+[22:18:54] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:38832 - "GET /global HTTP/1.1" 200 OK
+[22:18:55] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:38862 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:38896 - "GET / HTTP/1.1" 200 OK
+[22:18:58] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:38910 - "GET /global HTTP/1.1" 200 OK
+[22:19:01] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:58586 - "GET /global HTTP/1.1" 200 OK
+[22:19:01] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:58606 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58628 - "GET / HTTP/1.1" 200 OK
+[22:19:05] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:58648 - "GET /global HTTP/1.1" 200 OK
+[22:19:07] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:58674 - "GET /global HTTP/1.1" 200 OK
+[22:19:08] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:58690 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58716 - "GET / HTTP/1.1" 200 OK
+[22:19:14] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:33550 - "GET /global HTTP/1.1" 200 OK
+[22:19:14] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:33554 - "GET /global HTTP/1.1" 200 OK
+[22:19:14] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:33568 - "GET /global HTTP/1.1" 200 OK
+[22:19:21] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:41684 - "GET /global HTTP/1.1" 200 OK
+[22:19:21] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:41688 - "GET /global HTTP/1.1" 200 OK
+[22:19:23] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:41710 - "GET /global HTTP/1.1" 200 OK
+[22:19:27] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:41764 - "GET /global HTTP/1.1" 200 OK
+[22:19:28] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:41790 - "GET /global HTTP/1.1" 200 OK
+[22:19:31] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:48678 - "GET /global HTTP/1.1" 200 OK
+[22:19:33] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:48712 - "GET /global HTTP/1.1" 200 OK
+[22:19:34] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:48728 - "GET /global HTTP/1.1" 200 OK
+[22:19:38] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:48762 - "GET /global HTTP/1.1" 200 OK
+[22:19:56] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:36328 - "GET /global HTTP/1.1" 200 OK
+[22:19:57] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:36344 - "GET /global HTTP/1.1" 200 OK
+[22:19:57] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:36348 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36730 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36774 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49724 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49776 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51494 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51550 - "GET / HTTP/1.1" 200 OK
+[22:21:13] 📥 收到客户端更新: 样本数=830, 已收集=1/3
+INFO:     127.0.0.1:42066 - "POST /update HTTP/1.1" 200 OK
+[22:21:13] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:42080 - "GET /global HTTP/1.1" 200 OK
+[22:21:18] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:42122 - "GET /global HTTP/1.1" 200 OK
+[22:21:23] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:54032 - "GET /global HTTP/1.1" 200 OK
+[22:21:28] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:54110 - "GET /global HTTP/1.1" 200 OK
+[22:21:33] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:59664 - "GET /global HTTP/1.1" 200 OK
+[22:21:34] 📥 收到客户端更新: 样本数=829, 已收集=2/3
+INFO:     127.0.0.1:59692 - "POST /update HTTP/1.1" 200 OK
+[22:21:34] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:59706 - "GET /global HTTP/1.1" 200 OK
+[22:21:38] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:59752 - "GET /global HTTP/1.1" 200 OK
+[22:21:39] 📤 客户端拉取全局模型 (Round 0)
+INFO:     127.0.0.1:59788 - "GET /global HTTP/1.1" 200 OK
+[22:21:41] 📥 收到客户端更新: 样本数=829, 已收集=3/3
+
+[22:21:41] 🔄 开始第 1 轮聚合...
+[22:21:41] 📥 收集到 3 个客户端更新
+[22:21:41] 📊 总样本数: 2488
+[22:21:41]   Client 1: 样本数=830, 权重=0.334
+[22:21:41]   Client 2: 样本数=829, 权重=0.333
+[22:21:41]   Client 3: 样本数=829, 权重=0.333
+[22:21:41] 💾 保存checkpoint: server_checkpoints/global_round_1.pt
+[22:21:41] ✅ 第 1 轮聚合完成，等待下一轮...
+============================================================
+INFO:     127.0.0.1:57992 - "POST /update HTTP/1.1" 200 OK
+[22:21:41] 📤 客户端拉取全局模型 (Round 1)
+INFO:     127.0.0.1:57996 - "GET /global HTTP/1.1" 200 OK
+[22:21:43] 📤 客户端拉取全局模型 (Round 1)
+INFO:     127.0.0.1:58016 - "GET /global HTTP/1.1" 200 OK
+[22:21:44] 📤 客户端拉取全局模型 (Round 1)
+INFO:     127.0.0.1:58054 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58114 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56370 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56182 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56234 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56142 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56204 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58906 - "GET / HTTP/1.1" 200 OK
+[22:22:37] 📥 收到客户端更新: 样本数=829, 已收集=1/3
+INFO:     127.0.0.1:58960 - "POST /update HTTP/1.1" 200 OK
+[22:22:37] 📤 客户端拉取全局模型 (Round 1)
+INFO:     127.0.0.1:58962 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58994 - "GET / HTTP/1.1" 200 OK
+[22:22:41] 📥 收到客户端更新: 样本数=830, 已收集=2/3
+INFO:     127.0.0.1:46424 - "POST /update HTTP/1.1" 200 OK
+[22:22:41] 📤 客户端拉取全局模型 (Round 1)
+INFO:     127.0.0.1:46430 - "GET /global HTTP/1.1" 200 OK
+[22:22:42] 📥 收到客户端更新: 样本数=829, 已收集=3/3
+
+[22:22:42] 🔄 开始第 2 轮聚合...
+[22:22:42] 📥 收集到 3 个客户端更新
+[22:22:42] 📊 总样本数: 2488
+[22:22:42]   Client 1: 样本数=829, 权重=0.333
+[22:22:42]   Client 2: 样本数=830, 权重=0.334
+[22:22:42]   Client 3: 样本数=829, 权重=0.333
+[22:22:42] 💾 保存checkpoint: server_checkpoints/global_round_2.pt
+
+============================================================
+[22:22:42] 🎉 所有 2 轮联邦训练完成！
+[22:22:42] 📦 最终模型: server_checkpoints/global_round_2.pt
+============================================================
+
+INFO:     127.0.0.1:46448 - "POST /update HTTP/1.1" 200 OK
+[22:22:42] 📤 客户端拉取全局模型 (Round 2)
+INFO:     127.0.0.1:46462 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46482 - "GET / HTTP/1.1" 200 OK
+[22:22:46] 📤 客户端拉取全局模型 (Round 2)
+INFO:     127.0.0.1:46522 - "GET /global HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46548 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50170 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50220 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53864 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:53940 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57158 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:57200 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37070 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:37150 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41924 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41960 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36670 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:36720 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60408 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:60460 - "GET / HTTP/1.1" 200 OK
+INFO:     127.0.0.1:49470 - "GET / HTTP/1.1" 200 OK

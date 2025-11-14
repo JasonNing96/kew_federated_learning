@@ -3,6 +3,7 @@ mode: train
 model: yolov8s.pt
 data: /home/njh/project/kew_federated_learning/fed_oil_demo/oil-detection-2-2/data.yaml
 epochs: 5
+time: null
 patience: 20
 batch: 16
 imgsz: 640
@@ -28,6 +29,7 @@ amp: true
 fraction: 1.0
 profile: false
 freeze: null
+multi_scale: false
 overlap_mask: true
 mask_ratio: 4
 dropout: 0.0
@@ -49,6 +51,7 @@ augment: false
 agnostic_nms: false
 classes: null
 retina_masks: false
+embed: null
 show: false
 save_frames: false
 save_txt: false
@@ -63,9 +66,9 @@ keras: false
 optimize: false
 int8: false
 dynamic: false
-simplify: false
+simplify: true
 opset: null
-workspace: 4
+workspace: null
 nms: false
 lr0: 0.01
 lrf: 0.01
@@ -79,7 +82,6 @@ cls: 0.5
 dfl: 1.5
 pose: 12.0
 kobj: 1.0
-label_smoothing: 0.0
 nbs: 64
 hsv_h: 0.015
 hsv_s: 0.7
@@ -91,9 +93,14 @@ shear: 0.0
 perspective: 0.0
 flipud: 0.0
 fliplr: 0.5
+bgr: 0.0
 mosaic: 1.0
 mixup: 0.0
 copy_paste: 0.0
+copy_paste_mode: flip
+auto_augment: randaugment
+erasing: 0.4
+crop_fraction: 1.0
 cfg: null
 tracker: botsort.yaml
 save_dir: /home/njh/project/kew_federated_learning/fed_oil_demo/runs/oil_spill_gpu

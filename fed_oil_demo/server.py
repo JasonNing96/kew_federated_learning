@@ -235,6 +235,6 @@ def get_status():
 
 if __name__ == "__main__":
     import uvicorn
-    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🌐 启动服务器: http://0.0.0.0:8080")
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] 📡 支持内网多设备访问，使用内网IP:8080连接")
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🌐 启动服务器: http://0.0.0.0:8087")
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 📡 支持内网多设备访问，使用内网IP:8087连接")
+    uvicorn.run(app, host="0.0.0.0", port=8087)
