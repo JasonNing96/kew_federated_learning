@@ -1,74 +1,249 @@
-# flq_fed_v2.py
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 from __future__ import annotations
-import argparse, time, numpy as np, tensorflow as tf, os, random
+import argparse, numpy as np, tensorflow as tf
 
-# optional Excel export
-try:
-    import pandas as pd
-except Exception:
-    pd = None
+# ------------------------- Save fig -----------------------------------
+import pandas as pd, os
 
-# TF1 eager compat
-if tf.__version__.startswith("1."):
-    tf.compat.v1.enable_eager_execution()
+def save_excel_data(outfile: str, mode: str, history: dict,
+                    bin_series: np.ndarray | None = None,
+                    grad_samples: np.ndarray | None = None):
+    import pandas as pd, os, numpy as np
+    os.makedirs(os.path.dirname(outfile) or ".", exist_ok=True)
+    iters = len(history["loss"])
+    df_curve = pd.DataFrame({
+        "iter": np.arange(1, iters+1, dtype=np.int32),
+        "loss": history["loss"].astype(np.float32),             # 训练端平均(可参考)
+        "acc":  history["acc"].astype(np.float32),
+        "selcnt": history.get("selcnt", np.zeros(iters, np.int32)),
+        "bits_up_cum": history.get("bits_up_cum", np.zeros(iters, np.float64)),
+        "bits_down_cum": history.get("bits_down_cum", np.zeros(iters, np.float64)),
+    })
+    df_curve["cum_bits_total"] = df_curve["bits_up_cum"] + df_curve["bits_down_cum"]
+    if "entropy" in history:
+        df_curve["entropy"] = history["entropy"].astype(np.float32)  # Fig.2 用它
 
-# ---------------- utils: vectorize / de-vectorize ----------------
+    with pd.ExcelWriter(outfile) as xw:
+        df_curve.to_excel(xw, sheet_name=f"curve_{mode}", index=False)
+        if bin_series is not None:
+            pd.DataFrame({"comm": np.arange(len(bin_series), dtype=np.int32),
+                          "bit":  np.array(bin_series, dtype=np.int8)}
+            ).to_excel(xw, sheet_name=f"bin_{mode}", index=False)
+        if grad_samples is not None:
+            pd.DataFrame({"gt": np.array(grad_samples, dtype=np.float32)}
+            ).to_excel(xw, sheet_name=f"gt_{mode}", index=False)
+    print(f"[save_excel_data] wrote {outfile}")
+
+    
+# ------------------------- utils: pack/unpack -------------------------
+def weights_to_vec(vars_list):
+    return np.concatenate([v.numpy().reshape(-1) for v in vars_list]).astype(np.float32)
+
+def vec_to_weights(vec, vars_list):
+    idx = 0
+    for v in vars_list:
+        n = int(np.prod(v.shape))
+        arr = vec[idx:idx+n].reshape(v.shape)
+        v.assign(arr)
+        idx += n
+
 def gradtovec(grad_list):
-    vs = []
+    out = []
     for g in grad_list:
-        a = g.numpy()
-        vs.append(a.reshape(-1))
-    return np.concatenate(vs).astype(np.float32)
+        if g is None: out.append(np.zeros(0, np.float32)); continue
+        a = g.numpy() if hasattr(g, "numpy") else np.array(g)
+        out.append(a.reshape(-1))
+    return (np.concatenate(out, axis=0).astype(np.float32) if out else np.zeros(0, np.float32))
 
-def vectograd(vec, tmpl_list):
-    out, p = [], 0
-    for t in tmpl_list:
-        shp = t.shape.as_list() if hasattr(t.shape, "as_list") else list(t.shape)
-        cnt = int(np.prod(shp))
-        out.append(vec[p:p+cnt].reshape(shp).astype(np.float32))
-        p += cnt
+def vectograd(vec, grad_template):
+    out, idx = [], 0
+    for g in grad_template:
+        shape = (g.numpy() if hasattr(g, "numpy") else np.array(g)).shape
+        n = int(np.prod(shape))
+        part = vec[idx:idx+n]; idx += n
+        out.append(tf.convert_to_tensor(part.reshape(shape), dtype=tf.float32))
     return out
 
-# ---------------- quantizers ----------------
-def quantd(vec, ref, b):
-    """Relative uniform quantization (low-bit, b>=2)."""
+# ------------------------- quantization -------------------------
+def quantd(vec: np.ndarray, ref: np.ndarray, b: int) -> np.ndarray:
+    """Relative k-bit quantization with dequantization.
+       b==1 uses sign+mean-abs scale; b>=2 uses uniform levels."""
     diff = vec - ref
-    r = np.max(np.abs(diff)) + 1e-12
-    L = np.floor(2 ** b) - 1
-    delta = r / (L + 1e-12)
-    q = ref - r + 2 * delta * np.floor((diff + r + delta) / (2 * delta))
+    if b <= 0:
+        return ref.astype(np.float32)
+    if b == 1:
+        alpha = float(np.mean(np.abs(diff)))
+        if alpha == 0.0:
+            return ref.astype(np.float32)
+        sgn = np.sign(diff).astype(np.float32)
+        sgn[sgn == 0.0] = 1.0
+        return (ref + alpha * sgn).astype(np.float32)
+    r = float(np.max(np.abs(diff)))
+    if r == 0.0:
+        return ref.astype(np.float32)
+    step = 2.0 * r / (float(2**b) - 1.0)
+    q = ref - r + step * np.floor((vec - ref + r) / step + 0.5)
     return q.astype(np.float32)
 
-# def bin_relative_quant(gvec, ref):
-#     """Relative binary quantization with alpha = mean|diff|."""
-#     diff = gvec - ref
-#     alpha = np.mean(np.abs(diff)).astype(np.float32)
-#     vec_q = ref + alpha * np.sign(diff).astype(np.float32)
-#     qerr  = np.sum((vec_q - gvec)**2).astype(np.float32)
-#     return vec_q, qerr
+# ------------------------- datasets -------------------------
+def _load_arrays(name: str):
+    name = name.lower()
+    if name in ["mnist", "mn"]:
+        (xtr, ytr), (xte, yte) = tf.keras.datasets.mnist.load_data()
+    elif name in ["fmnist", "fashion", "fashion_mnist"]:
+        (xtr, ytr), (xte, yte) = tf.keras.datasets.fashion_mnist.load_data()
+    else:
+        raise ValueError(f"unknown dataset: {name}")
+    xtr = (xtr.astype("float32")/255.0)[..., None]
+    xte = (xte.astype("float32")/255.0)[..., None]
+    ytr = ytr.astype("int64"); yte = yte.astype("int64")
+    return (xtr, ytr), (xte, yte)
 
-# def bin_relative_quant(g_eff, ref, bin_scale=0.25):
-#     # 用 g_eff 的幅值定标，避免参考向量差分过大
-#     alpha = (bin_scale * np.mean(np.abs(g_eff))).astype(np.float32)
-#     vec_q = ref + alpha * np.sign(g_eff - ref).astype(np.float32)
-#     qerr  = np.sum((vec_q - g_eff)**2).astype(np.float32)
-#     return vec_q, qerr, alpha
+def make_federated_iid(dataset: str, M: int, batch: int, seed: int = 1234):
+    (xtr,ytr),(xte,yte)=_load_arrays(dataset)
+    rng=np.random.default_rng(seed); idx=np.arange(len(xtr)); rng.shuffle(idx)
+    xtr,ytr=xtr[idx],ytr[idx]
+    Mi=len(xtr)//M
+    dss=[]
+    for m in range(M):
+        xs=xtr[m*Mi:(m+1)*Mi]; ys=ytr[m*Mi:(m+1)*Mi]
+        ds=(tf.data.Dataset.from_tensor_slices((tf.convert_to_tensor(xs),tf.convert_to_tensor(ys)))
+             .shuffle(10000,seed=seed,reshuffle_each_iteration=True)
+             .batch(batch, drop_remainder=True)
+             .repeat()
+             .prefetch(tf.data.AUTOTUNE))
+        dss.append(ds)
+    test_ds=(tf.data.Dataset.from_tensor_slices((tf.convert_to_tensor(xte),tf.convert_to_tensor(yte)))
+             .batch(512).prefetch(tf.data.AUTOTUNE))
+    return dss,test_ds
 
-def bin_relative_quant(g_eff, ref, bin_scale=0.25):
-    # 相对二值：用当前与参考的差分幅度来定标
-    diff = g_eff - ref
-    alpha = (bin_scale * np.mean(np.abs(diff))).astype(np.float32)
-    sgn = np.sign(diff).astype(np.float32)
-    sgn[sgn == 0.0] = 1.0  # 防止0通道失活
-    vec_q = ref + alpha * sgn
-    qerr  = np.sum((vec_q - g_eff)**2).astype(np.float32)
-    return vec_q, qerr, float(alpha)
+def make_federated_non_iid(dataset: str,
+                           M: int,
+                           batch: int,
+                           alpha: float = 0.3,
+                           seed: int = 1234,
+                           max_tries: int = 100):
+    """
+    Dirichlet 非 IID 划分。
+    - dataset: "mnist" | "fmnist"
+    - M: 客户端数
+    - batch: 训练 batch 大小
+    - alpha: Dirichlet 超参（越小越非 IID：0.1/0.3 常用）
+    - seed: 随机种
+    - max_tries: 若有客户端样本数 < batch，则重采 Dirichlet 的最多次数
+    返回: (list[tf.data.Dataset], test_ds)
+    """
+    (xtr, ytr), (xte, yte) = _load_arrays(dataset)
+    num_classes = int(ytr.max()) + 1
+    rng = np.random.default_rng(seed)
+
+    # 预先按类分桶
+    per_class_idx = [np.where(ytr == c)[0].tolist() for c in range(num_classes)]
+
+    def _sample_partition():
+        # 打乱每个类桶
+        for li in per_class_idx:
+            rng.shuffle(li)
+        # Dirichlet 比例：shape = (num_classes, M)
+        P = rng.dirichlet([alpha] * M, size=num_classes)
+        client_bins = [[] for _ in range(M)]
+        # 按比例为每个类分配到各客户端
+        for c in range(num_classes):
+            idxs = per_class_idx[c]
+            n_c = len(idxs)
+            if n_c == 0:
+                continue
+            # 先按 floor 分配，再把余数给概率大的客户端
+            raw = P[c] * n_c
+            cnt = np.floor(raw).astype(int)
+            rem = n_c - int(cnt.sum())
+            if rem > 0:
+                order = np.argsort(raw - cnt)[::-1]
+                for j in range(rem):
+                    cnt[order[j % M]] += 1
+            # 切片放入
+            start = 0
+            for m in range(M):
+                k = int(cnt[m])
+                if k > 0:
+                    client_bins[m].extend(idxs[start:start + k])
+                    start += k
+        # 打乱每个客户端样本
+        for m in range(M):
+            rng.shuffle(client_bins[m])
+        return client_bins
+
+    # 反复采样直到所有客户端都有至少 batch 个样本（避免空迭代器）
+    bins = _sample_partition()
+    tries = 1
+    while tries < max_tries and min(len(b) for b in bins) < batch:
+        bins = _sample_partition()
+        tries += 1
+
+    # 构建 tf.data pipeline
+    dss = []
+    for m in range(M):
+        inds = np.array(bins[m], dtype=np.int64)
+        # 如果仍不足一个 batch，则补采全局样本到 batch（极端情况下兜底）
+        if len(inds) < batch:
+            extra = rng.integers(low=0, high=len(xtr), size=(batch - len(inds),), endpoint=False)
+            inds = np.concatenate([inds, extra], axis=0)
+        xm, ym = xtr[inds], ytr[inds]
+        ds = (tf.data.Dataset.from_tensor_slices(
+                (tf.convert_to_tensor(xm), tf.convert_to_tensor(ym)))
+              .shuffle(min(len(inds), 10000), seed=seed, reshuffle_each_iteration=True)
+              .batch(batch, drop_remainder=True)
+              .repeat()
+              .prefetch(tf.data.AUTOTUNE))
+        dss.append(ds)
+
+    test_ds = (tf.data.Dataset.from_tensor_slices(
+                (tf.convert_to_tensor(xte), tf.convert_to_tensor(yte)))
+               .batch(512)
+               .prefetch(tf.data.AUTOTUNE))
+    return dss, test_ds
 
 
-def laq_quantize_stochastic(g, k=8):
-    """LAQ: symmetric k-bit with stochastic rounding (unbiased)."""
-    L = 2**(k-1) - 1
-    s = (np.max(np.abs(g)) + 1e-12) / L
+# ------------------------- model -------------------------
+# def build_model(l2: float, lr: float):
+#     # 修正点：
+#     # 1) 输入假量化到 [0,1]（与你的归一化一致），不要把输出层裁剪到 [-1,1]
+#     # 2) 输出层不加激活，保留“原始 logits”，配合 from_logits=True
+#     regularizer = tf.keras.regularizers.L2(l2=l2)
+#     model = tf.keras.Sequential([
+#         tf.keras.layers.InputLayer(input_shape=(28, 28, 1)),
+#         tf.keras.layers.Lambda(lambda x: tf.quantization.fake_quant_with_min_max_vars(
+#             x, min=0.0, max=1.0, num_bits=8)),
+#         tf.keras.layers.Flatten(),
+#         # 可选：插一层小宽度 MLP 提升上限（例如 128 ReLU），先给最小改动：直接线性分类头
+#         tf.keras.layers.Dense(10, activation=None, kernel_regularizer=regularizer),
+#     ])
+#     optimizer = tf.keras.optimizers.SGD(learning_rate=lr)
+#     return model, optimizer
+
+def build_model(l2: float, lr: float):
+    reg = tf.keras.regularizers.L2(l2=l2)
+    model = tf.keras.Sequential([
+        tf.keras.layers.InputLayer(input_shape=(28,28,1)),
+        tf.keras.layers.Conv2D(32, 3, padding="same", activation="relu", kernel_regularizer=reg),
+        tf.keras.layers.Conv2D(32, 3, padding="same", activation="relu", kernel_regularizer=reg),
+        tf.keras.layers.MaxPooling2D(),
+        tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu", kernel_regularizer=reg),
+        tf.keras.layers.Conv2D(64, 3, padding="same", activation="relu", kernel_regularizer=reg),
+        tf.keras.layers.MaxPooling2D(),
+        tf.keras.layers.Flatten(),
+        tf.keras.layers.Dense(128, activation="relu", kernel_regularizer=reg),
+        tf.keras.layers.Dense(10, activation=None)  # logits
+    ])
+    opt = tf.keras.optimizers.Adam(learning_rate=lr)
+    return model, opt
+
+def laq_quantize_stochastic(g: np.ndarray, k: int = 8) -> np.ndarray:
+    # 对称 k-bit, 动态尺度 s = max|g| / L, L = 2^(k-1)-1
+    L = float(2**(k-1) - 1)
+    amax = float(np.max(np.abs(g))) + 1e-12
+    s = amax / L
     y = g / s
     low = np.floor(y)
     p = y - low
@@ -76,367 +251,266 @@ def laq_quantize_stochastic(g, k=8):
     q_int = np.clip(low + rnd, -L, L)
     return (q_int * s).astype(np.float32)
 
-# ---------------- data & model ----------------
-def load_dataset(name="mnist"):
-    if name == "fmnist":
-        (xtr, ytr), (xte, yte) = tf.keras.datasets.fashion_mnist.load_data()
+# ------------------------- training (with downlink quant) -------------------------
+def run(args):
+    import numpy as np, math, tensorflow as tf
+
+    # ---------- helpers ----------
+    def laq_quantize_stochastic(g: np.ndarray, k: int = 8) -> np.ndarray:
+        L = float(2**(k-1) - 1)
+        amax = float(np.max(np.abs(g))) + 1e-12
+        s = amax / L
+        y = g / s
+        low = np.floor(y)
+        p = y - low
+        rnd = (np.random.rand(*y.shape) < p).astype(np.float32)
+        q_int = np.clip(low + rnd, -L, L)
+        return (q_int * s).astype(np.float32)
+
+    # ---------- data ----------
+    part  = getattr(args, "partition", "iid").lower()
+    alpha = float(getattr(args, "dir_alpha", 0.3))
+    if part == "iid":
+        Datatr, Datate = make_federated_iid(args.dataset, args.M, args.batch, seed=args.seed)
     else:
-        (xtr, ytr), (xte, yte) = tf.keras.datasets.mnist.load_data()
-    xtr = (xtr / 255.0).astype("float32")[..., np.newaxis]
-    xte = (xte / 255.0).astype("float32")[..., np.newaxis]
-    return (xtr, ytr), (xte, yte)
+        Datatr, Datate = make_federated_non_iid(args.dataset, args.M, args.batch, alpha=alpha, seed=args.seed)
+    trains = [iter(ds) for ds in Datatr]
 
-def split_iid(x, y, M, batch):
-    n = len(x); per = n // M
-    dss, iters = [], []
-    for m in range(M):
-        ds = tf.data.Dataset.from_tensor_slices(
-            (tf.convert_to_tensor(x[m*per:(m+1)*per]),
-             tf.convert_to_tensor(y[m*per:(m+1)*per]))
-        ).shuffle(2048).repeat().batch(batch)
-        dss.append(ds); iters.append(iter(ds))
-    return dss, iters
+    # ---------- model ----------
+    model, optimizer = build_model(l2=args.cl, lr=args.lr)
 
-def split_dirichlet(x, y, M, alpha=0.3, batch=128):
-    y = np.array(y); C = int(np.max(y) + 1)
-    idx_by_c = [np.where(y == c)[0] for c in range(C)]
-    for arr in idx_by_c:
-        np.random.shuffle(arr)
-    parts = [[] for _ in range(M)]
-    for idx in idx_by_c:
-        props = np.random.dirichlet([alpha] * M)
-        cuts = (np.cumsum(props) * len(idx)).astype(int)[:-1]
-        chunks = np.split(idx, cuts)
-        for m in range(M): parts[m].extend(chunks[m])
-    dss, iters = [], []
-    for m in range(M):
-        sel = np.array(sorted(parts[m]))
-        ds = tf.data.Dataset.from_tensor_slices(
-            (tf.convert_to_tensor(x[sel]), tf.convert_to_tensor(y[sel]))
-        ).shuffle(2048).repeat().batch(batch)
-        dss.append(ds); iters.append(iter(ds))
-    return dss, iters
-
-def build_model(l2=0.0005, lr=0.02, model_kind="cnn"):
-    reg = tf.keras.regularizers.L2(l2)
-    if model_kind == "cnn":
-        model = tf.keras.Sequential([
-            tf.keras.layers.InputLayer(input_shape=(28,28,1)),
-            tf.keras.layers.Conv2D(32, 3, activation="relu"),
-            tf.keras.layers.MaxPool2D(),
-            tf.keras.layers.Conv2D(64, 3, activation="relu"),
-            tf.keras.layers.Flatten(),
-            tf.keras.layers.Dense(128, activation="relu", kernel_regularizer=reg),
-            tf.keras.layers.Dense(10)  # logits
-        ])
-    else:
-        model = tf.keras.Sequential([
-            tf.keras.layers.InputLayer(input_shape=(28,28,1)),
-            tf.keras.layers.Flatten(),
-            tf.keras.layers.Dense(10, kernel_regularizer=reg)
-        ])
-    opt = tf.keras.optimizers.SGD(learning_rate=lr, momentum=0.9)
-    return model, opt
-
-# ---------------- one run ----------------
-def run_one(mode, args):
-    import random, numpy as np, tensorflow as tf
-    try:
-        import pandas as pd
-    except Exception:
-        pd = None
-
-    # seeds
-    np.random.seed(getattr(args, "seed", 42))
-    random.seed(getattr(args, "seed", 42))
-    tf.random.set_seed(getattr(args, "seed", 42))
-
-    (xtr, ytr), (xte, yte) = load_dataset(args.dataset)
-    if args.partition == "iid":
-        dss, iters = split_iid(xtr, ytr, args.M, args.batch)
-    else:
-        dss, iters = split_dirichlet(xtr, ytr, args.M, alpha=args.dir_alpha, batch=args.batch)
-    test_ds = tf.data.Dataset.from_tensor_slices(
-        (tf.convert_to_tensor(xte), tf.convert_to_tensor(yte))
-    ).batch(512)
-
-    model, optimizer = build_model(l2=args.cl, lr=args.lr, model_kind=args.model)
-
+    # ---------- meta / states ----------
+    M = int(args.M); K = int(args.iters)
     nv = sum(int(np.prod(v.shape)) for v in model.trainable_variables)
-    M, D, C, alpha = args.M, args.D, args.C, args.lr
-    warmup    = getattr(args, "warmup", 50)
-    thr_scale = getattr(args, "thr_scale", 0.5)
-    ef_cap    = getattr(args, "ef_cap", 2.0)
-    bin_scale = getattr(args, "bin_scale", 0.25)
-    ema_beta  = getattr(args, "ema_beta", 0.2)   # 服务器端 EMA（仅 bin 用）
+    mode   = args.mode.lower()                        # "fedavg" | "bbit" | "bin" | "laq8"
+    b_up   = 1 if mode == "bin" else int(getattr(args, "b", 8))
+    b_down = int(getattr(args, "b_down", 0))          # 0→32-bit 下发；>0→低比特下发
 
-    # 懒惰缓存
-    clock = np.zeros(M, dtype=np.int32)
-    e = np.zeros(M, dtype=np.float32)
-    ehat = np.zeros(M, dtype=np.float32)
-    theta = np.zeros(nv, dtype=np.float32)
-    dtheta_hist = np.zeros((nv, D), dtype=np.float32)
-    mgr = np.zeros((M, nv), dtype=np.float32)          # 每客户端“已上报参考”
-    dL = np.zeros((M, nv), dtype=np.float32)           # 本轮触发增量
-    ef_residual = np.zeros((M, nv), dtype=np.float32)  # 误差补偿
-    g_hat = np.zeros(nv, dtype=np.float32)             # 服务器端量化梯度估计
-    alpha_ema = np.zeros(M, dtype=np.float32)          # 每客户端 α 的 EMA（仅 bin 用）
+    # 懒惰门限参数
+    D = int(getattr(args, "D", 10))
+    ck = float(getattr(args, "ck", 0.8))
+    C  = int(getattr(args, "C", 50))
+    warmup = int(getattr(args, "warmup", 50))
+    thr_scale = float(getattr(args, "thr_scale", 1.0))
+    alpha_lr  = float(args.lr)
 
-    Loss = np.zeros(args.iters, dtype=np.float32)
-    CommUp = np.zeros(args.iters, dtype=np.float64)
-    BitsUp = np.zeros(args.iters, dtype=np.float64)
-    BitsDown = np.zeros(args.iters, dtype=np.float64)
-    acc_eval = np.zeros(args.iters, dtype=np.float32)
+    # 资源约束
+    sel_clients    = int(getattr(args, "sel_clients", 0))
+    up_budget_bits = float(getattr(args, "up_budget_bits", 0.0))
 
-    bin_series = []
-    grad_sample_pool = []
+    # 参考与门限状态
+    ref_up   = np.zeros((M, nv), np.float32)
+    ref_down = np.zeros((M, nv), np.float32)
+    theta = np.zeros(nv, np.float32)
+    dtheta_hist = np.zeros((nv, D), np.float32)
+    ksi = np.zeros((D, D + 1), np.float32)
+    for d in range(D):
+        ksi[d, 0] = 1.0
+        for k in range(1, D + 1): ksi[d, k] = 1.0 / float(d + 1)
+    ksi *= ck
+    e = np.zeros(M, np.float32); ehat = np.zeros(M, np.float32); clock = np.zeros(M, np.int32)
 
-    for k in range(args.iters):
-        # 维护 dtheta 历史
-        var_vec = gradtovec(model.trainable_variables)
+    # ---------- logs ----------
+    loss_hist = np.zeros(K, np.float32)        # 训练端均值（参考）
+    acc_hist  = np.zeros(K, np.float32)        # 测试集 acc
+    entropy_hist = np.zeros(K, np.float32)     # 测试集交叉熵（Fig.2 用）
+    selcnt_h = np.zeros(K, np.int32)
+    bits_up_cum = np.zeros(K, np.float64); bits_down_cum = np.zeros(K, np.float64)
+    cum_up = 0.0; cum_down = 0.0
+
+    # ---------- loop ----------
+    for k in range(K):
+        # 历史强度 me_k
+        var = weights_to_vec(model.trainable_variables)
         if k > 0:
-            dtheta = var_vec - theta
-            dtheta_hist = np.roll(dtheta_hist, 1, axis=1)
-            dtheta_hist[:, 0] = dtheta
-        theta = var_vec
+            dtheta = var - theta
+            dtheta_hist = np.roll(dtheta_hist, 1, axis=1); dtheta_hist[:, 0] = dtheta
+        theta = var
+        me_k = 0.0; col_limit = min(k, D); kk = min(k, D)
+        for d in range(col_limit):
+            col = dtheta_hist[:, d]; me_k += float(ksi[d, kk] * (col @ col))
 
-        sel_mask = np.zeros(M, dtype=bool)
+        w_global = var.copy()
+        train_acc = tf.keras.metrics.SparseCategoricalAccuracy()
+        loss_round = 0.0; grads_tpl = None
 
+        # 候选缓存
+        cand_idx, cand_vec, cand_gain, cand_cost = [], [], [], []
+        cand_q_for_ref = []
+        cos_list, rmse_list, alpha_list = [], [], []
+
+        # ——遍历客户端：产生候选（门限筛选）——
         for m in range(M):
-            # 本地多步
-            acc_grad = None
-            for _ in range(args.local_steps):
-                images, labels = next(iters[m])
-                with tf.GradientTape() as tape:
-                    logits = model(images, training=True)
-                    ce = tf.reduce_mean(
-                        tf.keras.losses.sparse_categorical_crossentropy(labels, logits, from_logits=True))
-                    l2loss = sum([args.cl * tf.nn.l2_loss(v) for v in model.trainable_variables])
-                    loss_value = ce + l2loss
-                grads = tape.gradient(loss_value, model.trainable_variables)
-                if acc_grad is None:
-                    acc_grad = [g.numpy() for g in grads]
-                else:
-                    for i, g in enumerate(grads):
-                        acc_grad[i] += g.numpy()
-            grads = [tf.convert_to_tensor(g/float(args.local_steps)) for g in acc_grad]
-            gvec = gradtovec(grads)
+            # 下发用于本地计算；比特记账稍后按“被选数”统计
+            if b_down > 0:
+                w_down = quantd(w_global, ref_down[m], b=b_down)
+                ref_down[m] = w_down; vec_to_weights(w_down, model.trainable_variables)
+            else:
+                vec_to_weights(w_global, model.trainable_variables)
 
-            # 采样用于图
-            if m == 0:
-                bin_series.append(1 if gvec[0] >= 0 else 0)
-            if k % max(1, args.eval_every) == 0 and len(grad_sample_pool) < 2000:
-                grad_sample_pool.extend(gvec[:min(50, len(gvec))])
+            x, y = next(trains[m])
+            with tf.GradientTape() as tape:
+                logits = model(x, training=True)
+                train_acc.update_state(y, logits)
+                ce = tf.reduce_mean(tf.keras.losses.sparse_categorical_crossentropy(
+                    y, logits, from_logits=True))
+                l2 = sum([args.cl * tf.nn.l2_loss(v) for v in model.trainable_variables])
+                loss = ce + l2
+            grads = tape.gradient(loss, model.trainable_variables)
+            grads_tpl = grads
+            g = gradtovec(grads)
+            loss_round += float(loss.numpy()) / M
 
-            # 动态门限项 me_m
-            weights = 1.0 / (np.arange(D) + 1.0)
-            me_m = float(np.sum((dtheta_hist ** 2).sum(axis=0) * weights))
-
-            if mode == "flq_bin":
-                # 误差补偿 + 残差裁剪
-                g_eff = gvec + ef_residual[m]
-                g2 = np.linalg.norm(gvec) + 1e-12
-                r2 = np.linalg.norm(ef_residual[m])
-                cap = ef_cap * g2
-                if r2 > cap:
-                    ef_residual[m] *= (cap / (r2 + 1e-12))
-                    g_eff = gvec + ef_residual[m]
-
-                # ——二值相对量化：基于“创新量”定标；随机 tie-break；α 做 EMA——
-                diff = g_eff - mgr[m]
-                sgn = np.sign(diff).astype(np.float32)
-                if np.any(sgn == 0):
-                    z = (np.random.rand(*sgn.shape) < 0.5).astype(np.float32)
-                    sgn = np.where(sgn == 0, 2*z - 1.0, sgn)
-                alpha_raw = np.mean(np.abs(diff)).astype(np.float32)   # 用创新量定标
-                a_new = (bin_scale * alpha_raw).astype(np.float32)
-                alpha_m = 0.9 * alpha_ema[m] + 0.1 * a_new             # EMA
-                alpha_ema[m] = alpha_m
-                alpha_bin = float(alpha_m)
-                vec_q = mgr[m] + alpha_bin * sgn
-
-                # 量化误差与创新
-                e[m] = float(np.sum((vec_q - g_eff) ** 2))
-                dL[m] = vec_q - mgr[m]
-
-                # ——触发判定：仅保留超时/暖启动；用 alpha_bin 且按维度归一化——
-                nv_f = float(nv)
-                dL_en = float(dL[m] @ dL[m]) / nv_f
-                e_n   = e[m] / nv_f
-                eh_n  = ehat[m] / nv_f
-                me_term = me_m / ((alpha_bin * alpha_bin + 1e-12) * M * M * nv_f)
-                th = me_term + 3.0 * (e_n + eh_n)
-
-                time_force = (k < warmup) or (clock[m] >= C)
-                if time_force or (dL_en >= thr_scale * th):
-                    sel_mask[m] = True
-                    mgr[m] = vec_q
-                    ehat[m] = e[m]
-                    clock[m] = 0
-                    ef_residual[m] = g_eff - vec_q  # EF 更新
-                else:
-                    clock[m] = min(clock[m] + 1, C)
-                    ef_residual[m] = g_eff
-
-            elif mode == "flq_lowbit":
-                # 低比特相对量化 + 懒惰（保持原逻辑）
-                g_eff = gvec + ef_residual[m]
-                vec_q = quantd(g_eff, mgr[m], b=args.b_up)
-                diff = vec_q - g_eff
-                e[m] = float(diff @ diff)
-                dL[m] = vec_q - mgr[m]
-                th = (me_m / (alpha * alpha * M * M)) + 3.0 * (e[m] + ehat[m])
-                force = (k < warmup) or (clock[m] >= C)
-                if force or (float(dL[m] @ dL[m]) >= thr_scale * th):
-                    sel_mask[m] = True
-                    mgr[m] = vec_q; ehat[m] = e[m]; clock[m] = 0
-                    ef_residual[m] = g_eff - vec_q
-                else:
-                    clock[m] = min(clock[m] + 1, C)
-                    ef_residual[m] = g_eff
-
+            if mode in ["bbit", "bin"]:
+                diff = g - ref_up[m]
+                if b_up == 1:
+                    alpha_list.append(float(np.mean(np.abs(diff))))
+                q = quantd(g, ref_up[m], b=b_up)
+                e[m] = float(np.dot(q - g, q - g))
+                denom = (np.linalg.norm(g) * np.linalg.norm(q) + 1e-12)
+                cos_list.append(float(np.dot(g, q) / denom))
+                rmse_list.append(float(np.sqrt(np.mean((g - q) ** 2))))
+                dL = q - ref_up[m]; gain = float(np.dot(dL, dL))
+                rhs = (me_k / (alpha_lr * alpha_lr * M * M)) + 3.0 * (e[m] + ehat[m])
+                pass_thr = (gain >= thr_scale * rhs) or (k < warmup) or (clock[m] >= C)
+                if pass_thr:
+                    cand_idx.append(m); cand_vec.append(q); cand_q_for_ref.append(q)
+                    cand_gain.append(gain); cand_cost.append(b_up * nv)
             elif mode == "laq8":
-                dL[m] = laq_quantize_stochastic(gvec, k=8)
-                sel_mask[m] = True
+                q = laq_quantize_stochastic(g, k=8)          # 向量级动态缩放
+                denom = (np.linalg.norm(g) * np.linalg.norm(q) + 1e-12)
+                cos_list.append(float(np.dot(g, q) / denom))
+                rmse_list.append(float(np.sqrt(np.mean((g - q) ** 2))))
+                gain = float(np.dot(g, g)); cost_bits = 8 * nv
+                cand_idx.append(m); cand_vec.append(q); cand_q_for_ref.append(None)
+                cand_gain.append(gain); cand_cost.append(cost_bits)
+            else:  # fedavg
+                gain = float(np.dot(g, g)); cost_bits = 32 * nv
+                cand_idx.append(m); cand_vec.append(g); cand_q_for_ref.append(None)
+                cand_gain.append(gain); cand_cost.append(cost_bits)
 
-            else:  # qgd
-                dL[m] = gvec
-                sel_mask[m] = True
+        # 回滚全局权重
+        vec_to_weights(w_global, model.trainable_variables)
 
-        # ——聚合与更新——
-        sel_cnt = float(sel_mask.sum())
-
-        if mode == "flq_bin":
-            # 仅在有人触发时推进；用“参考向量均值”的 EMA 平滑
-            if sel_cnt > 0:
-                target = mgr.mean(axis=0)
-                g_hat = (1.0 - ema_beta) * g_hat + ema_beta * target
-                ccgrads = vectograd(g_hat, grads)
-                if args.clip_global > 0:
-                    gnorm = np.sqrt(sum((g**2).sum() for g in ccgrads))
-                    if gnorm > args.clip_global:
-                        scale = args.clip_global / (gnorm + 1e-12)
-                        ccgrads = [g * scale for g in ccgrads]
-                optimizer.apply_gradients(zip(ccgrads, model.trainable_variables))
-            # 无触发：不推进
-
-        elif mode == "flq_lowbit":
-            if sel_cnt > 0:
-                target = mgr.mean(axis=0)
-                ccgrads = vectograd(target, grads)
-                if args.clip_global > 0:
-                    gnorm = np.sqrt(sum((g**2).sum() for g in ccgrads))
-                    if gnorm > args.clip_global:
-                        scale = args.clip_global / (gnorm + 1e-12)
-                        ccgrads = [g * scale for g in ccgrads]
-                optimizer.apply_gradients(zip(ccgrads, model.trainable_variables))
+        # ——选择：在预算内选收益/成本高的子集——
+        order = np.argsort(np.array(cand_gain) / (np.array(cand_cost) + 1e-12))[::-1]
+        selected = []
+        if sel_clients > 0:
+            selected = list(order[:min(sel_clients, len(order))])
+        elif up_budget_bits > 0.0:
+            budget = up_budget_bits
+            for i in order:
+                if cand_cost[i] <= budget:
+                    selected.append(i); budget -= cand_cost[i]
         else:
-            # QGD/LAQ8：当轮均值
-            g_hat = dL.mean(axis=0)
-            ccgrads = vectograd(g_hat, grads)
-            if args.clip_global > 0:
-                gnorm = np.sqrt(sum((g**2).sum() for g in ccgrads))
-                if gnorm > args.clip_global:
-                    scale = args.clip_global / (gnorm + 1e-12)
-                    ccgrads = [g * scale for g in ccgrads]
-            optimizer.apply_gradients(zip(ccgrads, model.trainable_variables))
+            selected = list(order)
 
-        # 下/上行比特统计
-        if mode in ["flq_bin", "flq_lowbit"]:
-            bit_down = 8 * nv * M
-        elif mode == "laq8":
-            bit_down = (args.down_laq8 if args.down_laq8 in [8, 32] else 32) * nv * M
-        else:
-            bit_down = 32 * nv * M
+        # ——聚合与状态更新——
+        bits_up_this = 0.0
+        if len(selected) > 0:
+            agg = np.zeros(nv, np.float32)
+            for i in selected:
+                agg += cand_vec[i]
+                bits_up_this += cand_cost[i]
+                m = cand_idx[i]
+                if mode in ["bbit", "bin"]:
+                    ref_up[m] = cand_q_for_ref[i]
+                    ehat[m]  = e[m]
+                    clock[m] = 0
+                else:
+                    clock[m] = 0
+            g_hat = agg / float(len(selected))
+            cc = vectograd(g_hat, grads_tpl)
+            optimizer.apply_gradients(zip(cc, model.trainable_variables))
 
-        if mode == "flq_bin":
-            bit_up = args.b_up * nv * sel_cnt
-        elif mode == "flq_lowbit":
-            bit_up = args.b_up * nv * sel_cnt
-        elif mode == "laq8":
-            bit_up = 8 * nv * M
-        else:
-            bit_up = 32 * nv * M
+        # 未选
+        not_sel = set(range(M)) - set(cand_idx[i] for i in selected)
+        for m in not_sel:
+            clock[m] = min(clock[m] + 1, C + 1)
 
-        Loss[k] = float(loss_value.numpy())
-        CommUp[k] = (0 if k == 0 else CommUp[k-1]) + sel_cnt
-        BitsUp[k] = (0 if k == 0 else BitsUp[k-1]) + bit_up
-        BitsDown[k] = (0 if k == 0 else BitsDown[k-1]) + bit_down
+        # ——比特记账：下发只按“选中数”计（与论文口径一致）——
+        selcnt = len(selected)
+        bits_down_this = (b_down if b_down > 0 else 32) * nv * selcnt
+        cum_up += bits_up_this; cum_down += bits_down_this
 
-        # 评估与日志
-        if (k + 1) % max(1, args.eval_every) == 0:
-            acc = tf.keras.metrics.SparseCategoricalAccuracy()
-            for xi, yi in test_ds:
-                acc.update_state(yi, model(xi, training=False))
-            acc_eval[k] = acc.result().numpy()
-            trig_rate = sel_cnt / M
-            print(f"[{k+1}/{args.iters}] mode={mode} acc={acc_eval[k]:.4f} loss={Loss[k]:.4f} sel={int(sel_cnt)} trig={trig_rate:.2f} up_bits={BitsUp[k]:.2e}")
+        # ——测试集交叉熵与精度（统一 Fig.2 口径）——
+        test_acc = tf.keras.metrics.SparseCategoricalAccuracy()
+        entropy_sum = 0.0; ntest = 0
+        for xi, yi in Datate:
+            logits = model(xi, training=False)
+            test_acc.update_state(yi, logits)
+            ent = tf.reduce_sum(tf.keras.losses.sparse_categorical_crossentropy(
+                yi, logits, from_logits=True)).numpy()
+            entropy_sum += float(ent); ntest += int(yi.shape[0])
+        entropy = entropy_sum / max(1, ntest)
 
-        # 余弦学习率
-        if args.lr_min < args.lr:
-            t = (k+1)/float(args.iters)
-            lr_new = args.lr_min + 0.5*(args.lr - args.lr_min)*(1+np.cos(np.pi*t))
-            try:
-                tf.keras.backend.set_value(optimizer.learning_rate, lr_new)
-            except Exception:
-                optimizer.learning_rate = lr_new
+        # ——日志写入——
+        loss_hist[k]    = loss_round
+        acc_hist[k]     = float(test_acc.result().numpy())
+        entropy_hist[k] = float(entropy)
+        selcnt_h[k]     = selcnt
+        bits_up_cum[k]   = cum_up
+        bits_down_cum[k] = cum_down
 
-    # 导出 Excel
-    if pd is not None:
-        df_curve = pd.DataFrame({
-            "iter": np.arange(1, args.iters+1),
-            "loss": Loss,
-            "acc": acc_eval,
-            "cum_uploads": CommUp,
-            "cum_bits_up": BitsUp,
-            "cum_bits_down": BitsDown,
-            "cum_bits_total": BitsUp + BitsDown
-        })
-        fn = f"./{args.out_prefix}_{args.dataset}_{mode}.xlsx"
-        with pd.ExcelWriter(fn) as xw:
-            df_curve.to_excel(xw, sheet_name=f"curve_{mode}", index=False)
-            pd.DataFrame({"comm": np.arange(len(bin_series)),
-                          "bit": np.array(bin_series, dtype=int)}
-                        ).to_excel(xw, sheet_name=f"bin_{mode}", index=False)
-            if len(grad_sample_pool) > 0:
-                pd.DataFrame({"gt": np.array(grad_sample_pool, dtype=np.float32)}
-                            ).to_excel(xw, sheet_name=f"gt_{mode}", index=False)
-        print(f"Excel saved: {fn}")
+        # 打印
+        extra = ""
+        if len(cos_list):
+            extra = f" | cosμ={np.mean(cos_list):.3f} rmseμ={np.mean(rmse_list):.4f}"
+            if mode == "bin" and len(alpha_list): extra += f" αμ={np.mean(alpha_list):.4f}"
+        print(f"[{k+1}/{K}] acc={acc_hist[k]:.4f} entropy={entropy_hist[k]:.4f} "
+              f"sel={selcnt}/{len(cand_idx)}/{M}{extra} | bits↑Σ={cum_up:.2e} bits↓Σ={cum_down:.2e}")
+
+    # ——返回历史——
+    return {
+        "loss": loss_hist, "acc": acc_hist, "entropy": entropy_hist,
+        "selcnt": selcnt_h, "bits_up_cum": bits_up_cum, "bits_down_cum": bits_down_cum
+    }
 
 
-# ---------------- main ----------------
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", choices=["mnist","fmnist"], default="mnist")
-    ap.add_argument("--mode", choices=["flq_bin","flq_lowbit","laq8","qgd"], default="flq_bin")
-    ap.add_argument("--partition", choices=["iid","dir"], default="iid")
-    ap.add_argument("--dir_alpha", type=float, default=0.3)
-    ap.add_argument("--M", type=int, default=10)
-    ap.add_argument("--iters", type=int, default=400)
-    ap.add_argument("--local_steps", type=int, default=2)
-    ap.add_argument("--b_up", type=int, default=1, help="uplink bits for FLQ; bin=1, lowbit=8 etc.")
-    ap.add_argument("--C", type=int, default=10)
-    ap.add_argument("--D", type=int, default=10)
-    ap.add_argument("--warmup", type=int, default=50, help="前 warmup 轮强制上传")
-    ap.add_argument("--thr_scale", type=float, default=0.5, help="门限缩放系数(<1 放松，>1 收紧)")
-    ap.add_argument("--lr", type=float, default=0.02)
-    ap.add_argument("--lr_min", type=float, default=0.005)
-    ap.add_argument("--cl", type=float, default=0.0005)
-    ap.add_argument("--batch", type=int, default=128)
-    ap.add_argument("--eval_every", type=int, default=10)
-    ap.add_argument("--down_laq8", type=int, default=32)
-    ap.add_argument("--clip_global", type=float, default=5.0)
-    ap.add_argument("--model", choices=["linear","cnn"], default="cnn")
-    ap.add_argument("--out_prefix", type=str, default="results")
-    ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--bin_scale", type=float, default=0.25, help="alpha 缩放，二值步长降温")
-    ap.add_argument("--ef_cap", type=float, default=2.0, help="EF 残差相对范数上限系数")
-
-    args = ap.parse_args()
-
-    tic = time.time()
-    run_one(args.mode, args)
-    print(f"Runtime {time.time()-tic:.2f}s")
+# ------------------------- main -------------------------
+def parse_args():
+    p = argparse.ArgumentParser("FLQ v2 with downlink parameter quantization + lazy/budget")
+    # data
+    p.add_argument("--dataset", type=str, default="mnist",
+                   choices=["mnist", "fmnist", "fashion", "fashion_mnist"])
+    p.add_argument("--M", type=int, default=10)
+    p.add_argument("--iters", type=int, default=800)
+    p.add_argument("--batch", type=int, default=64)
+    # modes
+    p.add_argument("--mode", type=str, default="bbit", choices=["fedavg", "bbit", "bin","laq8"])
+    p.add_argument("--b", type=int, default=4, help="uplink bits; bin mode forces 1")
+    p.add_argument("--b_down", type=int, default=8, help="downlink bits; 0/32 disable")
+    # optimization
+    p.add_argument("--lr", type=float, default=1e-3)
+    p.add_argument("--cl", type=float, default=5e-4)
+    p.add_argument("--seed", type=int, default=42)
+    # budget selector (set one; both 0 -> no budget limit)
+    p.add_argument("--sel_clients", type=int, default=10, help="max selected clients per round")
+    p.add_argument("--up_budget_bits", type=float, default=0.0, help="uplink bit budget per round")
+    # lazy trigger (defaults effectively OFF to focus on budget-only comparisons)
+    p.add_argument("--D", type=int, default=10, help="history window length")
+    p.add_argument("--ck", type=float, default=0.8, help="history weight scale")
+    p.add_argument("--C", type=int, default=1000000000, help="timeout rounds for force select")
+    p.add_argument("--warmup", type=int, default=0, help="force select rounds at start")
+    p.add_argument("--thr_scale", type=float, default=0.0, help="threshold scale (0 disables)")
+    p.add_argument("--partition", type=str, default="iid", choices=["iid","non_iid"])
+    p.add_argument("--dir_alpha", type=float, default=0.3)  # non-iid 强度，越小越非IID
+    return p.parse_args()
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    hist = run(args)
+    prefix = "results"
+    outfile = f"results/{prefix}_{args.dataset}_{args.mode}.xlsx"
+    save_excel_data(outfile, args.mode, hist,
+                bin_series=None, grad_samples=None)  # bin/样本可按需填
+
+# python flq_fed_v2.py --dataset fmnist --mode bin --b_down 8 --lr 5e-4 --iters 800
+# 门限 clients 
+# python flq_fed_v2.py --dataset mnist --mode bbit --b 4 --b_down 8 --iters 800 --sel_clients 3
+# python flq_fed_v2.py --dataset mnist --mode bin --b_down 8 --iters 800 --up_budget_bits 1e9
+
+# python flq_fed_v2.py --dataset mnist --mode bbit --b 4 --M 10 --iters 800 --batch 64 --lr 1e-3 --cl 5e-4 --b_down 8 --up_budget_bits 44910528
+# python flq_fed_v2.py --dataset mnist --mode bbit --b 2 --M 10 --iters 800 --batch 64 --lr 1e-3 --cl 5e-4 --b_down 8 --up_budget_bits 44910528
+
+# python flq_fed_v2.py --dataset mnist --mode bin --M 10 --iters 800 --batch 64 --lr 5e-4 --cl 5e-4 --b_down 8 --up_budget_bits 44910528 

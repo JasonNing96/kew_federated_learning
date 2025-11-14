@@ -2,8 +2,5 @@
 ./results
 ./logs
 ./figures
-./experiments/logs
-./figure
-./logs
-./results
 ./legacy
+./docker

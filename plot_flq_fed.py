@@ -241,7 +241,7 @@ def main():
     import argparse, os, numpy as np, pandas as pd, matplotlib.pyplot as plt
 
     ap = argparse.ArgumentParser("FLQ 绘图：Fig.2 / Fig.3 / Fig.4")
-    ap.add_argument("--excel_dir", type=str, default=".")
+    ap.add_argument("--excel_dir", type=str, default="results")
     ap.add_argument("--dataset", choices=["mnist","fmnist"], default="mnist")
     ap.add_argument("--modes", nargs="+", default=MODES_DEFAULT)  # 用于 Fig.2：["fedavg","laq8","bbit"]
     ap.add_argument("--prefix", type=str, default="results")
@@ -283,14 +283,14 @@ def main():
     #         smooth_win=args.smooth_win, smooth_ema=args.smooth_ema,
     #         legend_size=args.legend_size, line_width=args.line_width
     #     )
-    #     out2 = f"Fig2_{args.dataset}.png"
+    #     out2 = f"figures/Fig2_{args.dataset}.png"
     #     if args.save: fig2.savefig(out2, dpi=300); print(f"[save] {out2}")
     #     else: plt.show()
 
     # ---- Fig.3：通信中的二值量化结果（可选，需要 bin 的 Excel）----
     if args.do_fig3 and ("bin" in excel_map):
         fig3, _ = draw_paper_fig3_binary(excel_map["bin"], mode_key="bin", max_comm=args.fig3_max_comm)
-        out3 = f"Fig3_{args.dataset}.png"
+        out3 = f"figures/Fig3_{args.dataset}.png"
         if args.save: fig3.savefig(out3, dpi=300); print(f"[save] {out3}")
         else: plt.show()
 
@@ -304,7 +304,7 @@ def main():
     # )
     # # 分别保存 k=... 的子图
     # for k, (fig, _) in zip(ks, figs):
-    #     out4 = f"Fig4_k{k}_{args.dataset}.png"
+    #     out4 = f"figures/Fig4_k{k}_{args.dataset}.png"
     #     if args.save: fig.savefig(out4, dpi=300); print(f"[save] {out4}")
     #     else: plt.show()
 

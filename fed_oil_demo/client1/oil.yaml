@@ -1,0 +1,7 @@
+names:
+  0: no-oil
+  1: oil
+nc: 2
+path: /home/njh/project/fed_oil_detection/fed_oil_demo/client1/dataset
+train: train/images
+val: val/images

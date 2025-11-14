@@ -1,0 +1,13 @@
+names:
+- no-oil
+- oil
+nc: 2
+roboflow:
+  license: CC BY 4.0
+  project: oil-detection-2
+  url: https://universe.roboflow.com/yolo-m1lny/oil-detection-2/dataset/2
+  version: 2
+  workspace: yolo-m1lny
+train: train/images
+val: valid/images
+test: test/images

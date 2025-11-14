@@ -495,5 +495,5 @@ if __name__ == "__main__":
     args = parse_args()
     tf.random.set_seed(args.seed); np.random.seed(args.seed)
     hist = run(args)
-    outfile = f"results_{args.dataset}_{args.mode}.xlsx"
+    outfile = f"results/results_{args.dataset}_{args.mode}_{args.iters}.xlsx"
     save_excel_data(outfile, args.mode, hist, bin_series=hist.get("bin_series"))
