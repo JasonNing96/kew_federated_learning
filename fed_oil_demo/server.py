@@ -4,6 +4,7 @@
 1. 提供全局模型权重下载 (/global)
 2. 接收客户端更新并聚合 (/update)
 3. 支持多轮联邦训练
+4. 支持FLQ量化聚合（可选）
 """
 from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.responses import Response, JSONResponse
@@ -13,13 +14,35 @@ import threading
 from ultralytics import YOLO
 from datetime import datetime
 import os
+import sys
+import time
+
+# 添加项目根目录到路径
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+from flq_modules.config import FLQConfig
+from flq_modules.utils import ParamMetadata, model_to_vector, vector_to_model
+from flq_modules.aggregation import QuantizedAggregator, fedavg_aggregate
+from flq_modules.quantization import compute_compression_ratio
+
+# ============= 加载配置 =============
+try:
+    config = FLQConfig()
+    print(f"✅ 加载配置: {config}")
+except Exception as e:
+    print(f"⚠️  配置加载失败，使用默认配置: {e}")
+    config = None
 
 # ============= 配置参数 =============
-CLIENTS_PER_ROUND = 3  # 每轮参与的客户端数
-ROUNDS = 2              # 快速测试用
-MODEL_PATH = "yolov8n.pt"
+CLIENTS_PER_ROUND = config.clients_per_round if config else 3
+ROUNDS = config.rounds if config else 2
+MODEL_PATH = config.model_name if config else "yolov8n.pt"
 DATA_YAML = "client1/oil.yaml"  # 数据配置（用于初始化正确的模型架构）
-SAVE_DIR = "server_checkpoints"
+SAVE_DIR = config.save_dir if config else "server_checkpoints"
+
+# 量化参数
+QUANT_ENABLED = config.quantization_enabled if config else False
+QUANT_BITS = config.quantization_bits if config else 32
+USE_ERROR_FEEDBACK = config.use_error_feedback if config else True
 
 # ============= 初始化 =============
 app = FastAPI(title="Federated Learning Server")
@@ -75,18 +98,61 @@ buf = []        # 缓存客户端上传的state_dict
 buf_n = []      # 缓存客户端样本数
 training_done = False
 
+# 统计信息
+stats = {
+    "round_times": [],      # 每轮耗时
+    "upload_bits": [],      # 上行比特数
+    "download_bits": [],    # 下行比特数
+    "accuracies": [],       # 每轮准确率
+    "round_start_time": None
+}
+
+# 初始化量化聚合器（如果启用）
+quantized_aggregator = None
+param_metadata = None
+if QUANT_ENABLED:
+    param_metadata = ParamMetadata(model.model)
+    quantized_aggregator = QuantizedAggregator(
+        bits=QUANT_BITS,
+        shapes=param_metadata.shapes,
+        use_error_feedback=USE_ERROR_FEEDBACK
+    )
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔧 量化聚合器已启用: {QUANT_BITS}-bit")
+
 print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ 服务器就绪，等待客户端连接...")
 print(f"[{datetime.now().strftime('%H:%M:%S')}] 📊 配置: {CLIENTS_PER_ROUND}客户端/轮 × {ROUNDS}轮")
+if QUANT_ENABLED:
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🗜️  量化: {QUANT_BITS}-bit (压缩率{compute_compression_ratio(32, QUANT_BITS):.1f}x)")
+else:
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 📦 量化: 关闭 (FP32基线)")
 print("=" * 60)
 
+
+def print_final_summary():
+    """打印最终训练总结"""
+    print(f"\n{'='*70}")
+    print(f"{'🎉 联邦学习训练完成':^70}")
+    print(f"{'='*70}")
+    print(f"  🔢 总轮数      : {round_id}")
+    print(f"  ⏱️  总耗时      : {sum(stats['round_times']):.2f} 秒")
+    print(f"  📤 总上行      : {sum(stats['upload_bits'])/1e9:.2f} Gbits")
+    print(f"  📥 总下行      : {sum(stats['download_bits'])/1e9:.2f} Gbits")
+    print(f"  📊 总通信      : {(sum(stats['upload_bits'])+sum(stats['download_bits']))/1e9:.2f} Gbits")
+    if stats['accuracies']:
+        print(f"  🎯 最终mAP50   : {stats['accuracies'][-1]:.4f}")
+        print(f"  📈 最佳mAP50   : {max(stats['accuracies']):.4f}")
+    print(f"  📦 最终模型    : server_checkpoints/global_round_{round_id}.pt")
+    print(f"{'='*70}\n")
 
 def aggregate():
     """
     FedAvg聚合算法：加权平均所有客户端的权重
     权重 = local_weight * (n_samples / total_samples)
     """
-    global global_sd, buf, buf_n, round_id, training_done
+    global global_sd, buf, buf_n, round_id, training_done, stats
 
+    round_start = time.time()
+    
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🔄 开始第 {round_id + 1} 轮聚合...")
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 📥 收集到 {len(buf)} 个客户端更新")
 
@@ -126,6 +192,51 @@ def aggregate():
     torch.save(global_sd, checkpoint_path)
     print(f"[{datetime.now().strftime('%H:%M:%S')}] 💾 保存checkpoint: {checkpoint_path}")
 
+    # === 统计通信开销 ===
+    # 计算单个state_dict的比特数
+    param_count = sum(v.numel() for v in global_sd.values())
+    
+    # 上行：客户端使用量化比特数（如果启用）
+    upload_bits_per_client = param_count * (QUANT_BITS if QUANT_ENABLED else 32)
+    upload_bits = upload_bits_per_client * len(buf_n)
+    
+    # 下行：服务器始终下发FP32模型
+    download_bits_per_client = param_count * 32
+    download_bits = download_bits_per_client * len(buf_n)
+    
+    stats["upload_bits"].append(upload_bits)
+    stats["download_bits"].append(download_bits)
+    
+    # === 验证模型准确率（暂时跳过，训练完成后统一验证） ===
+    # TODO: 实时验证有PyTorch兼容性问题，后续优化
+    mAP50 = 0.0
+    mAP50_95 = 0.0
+    stats["accuracies"].append(0.0)
+    
+    # === 计算耗时 ===
+    round_time = time.time() - round_start
+    stats["round_times"].append(round_time)
+    
+    # === 打印统计信息 ===
+    print(f"\n{'='*70}")
+    print(f"{'📊 Round ' + str(round_id) + ' 统计信息':^70}")
+    print(f"{'='*70}")
+    print(f"  ⏱️  Tround    : {round_time:.2f} 秒")
+    print(f"  📤 BitUp     : {upload_bits/1e9:.3f} Gbits ({upload_bits/1e6:.1f} MB)")
+    print(f"  📥 BitDown   : {download_bits/1e9:.3f} Gbits ({download_bits/1e6:.1f} MB)")
+    print(f"  📊 BitTotal  : {(upload_bits+download_bits)/1e9:.3f} Gbits")
+    # print(f"  🎯 mAP50     : {mAP50:.4f}")  # 实时验证已禁用
+    print(f"  👥 Clients   : {len(buf_n)}/{CLIENTS_PER_ROUND}")
+    print(f"  📦 Params    : {param_count:,} ({param_count*4/1e6:.1f} MB)")
+    
+    # 压缩率（相对FP32）
+    if QUANT_ENABLED:
+        compression_ratio = compute_compression_ratio(32, QUANT_BITS)
+        print(f"  🗜️  Compress  : {compression_ratio:.2f}x ({QUANT_BITS}-bit quantization)")
+    else:
+        print(f"  🗜️  Compress  : 1.00x (FP32 baseline)")
+    print(f"{'='*70}\n")
+
     # 清空缓存
     buf.clear()
     buf_n.clear()
@@ -133,13 +244,10 @@ def aggregate():
     # 检查是否完成所有轮次
     if round_id >= ROUNDS:
         training_done = True
-        print(f"\n{'='*60}")
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🎉 所有 {ROUNDS} 轮联邦训练完成！")
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] 📦 最终模型: {checkpoint_path}")
-        print(f"{'='*60}\n")
+        print_final_summary()
     else:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ 第 {round_id} 轮聚合完成，等待下一轮...")
-        print("=" * 60)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ 第 {round_id} 轮完成，等待下一轮...")
+        print("=" * 70)
 
 
 @app.get("/")

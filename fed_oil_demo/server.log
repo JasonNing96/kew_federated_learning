@@ -250,3 +250,7 @@ INFO:     127.0.0.1:36720 - "GET / HTTP/1.1" 200 OK
 INFO:     127.0.0.1:60408 - "GET / HTTP/1.1" 200 OK
 INFO:     127.0.0.1:60460 - "GET / HTTP/1.1" 200 OK
 INFO:     127.0.0.1:49470 - "GET / HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [11867]

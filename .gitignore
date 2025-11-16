@@ -1,7 +1,46 @@
-./data
-./results
-./logs
-./figures
-./legacy
-./docker
-./federated_learning_jetson
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Outputs (除了示例结果)
+outputs/server/checkpoints/*.pt
+outputs/client*/runs/
+outputs/client*/logs/*.log
+outputs/server/logs/*.log
+outputs/experiments/*.log
+
+# Models (大文件不提交，需要用户自己下载)
+models/*.pt
+!models/README.md
+
+# Data (数据集不提交)
+data/client*/dataset/
+!data/client*/oil.yaml
+!data/oil.yaml
+!data/README.md
+
+# Temporary files
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
+
+# Legacy (归档代码不提交)
+legacy/
+
+# YOLO cache
+*.cache

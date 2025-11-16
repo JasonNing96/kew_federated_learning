@@ -97,6 +97,8 @@ def check_files():
     
     required_dirs = [
         "oil-detection-2-2",
+        "../data",
+        "../outputs",
     ]
     
     all_ok = True
@@ -165,7 +167,7 @@ def check_optional_packages():
 def main():
     """主函数"""
     print("=" * 60)
-    print("  Fed Oil Detection Demo - 环境检查")
+    print("  Fed Oil Detection Demo - 环境检查（支持标准化目录）")
     print("=" * 60)
     
     # 切换到脚本所在目录
