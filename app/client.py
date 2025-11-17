@@ -9,10 +9,11 @@ import yaml
 import requests
 from pathlib import Path
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 from ultralytics import YOLO
 
 from .config import Config
+from .model_utils import compute_model_size
 
 
 # ==================== 全局配置 ====================
@@ -105,7 +106,7 @@ def train_local(model: YOLO, round_id: int, config: Config):
         raise
 
 
-def push_update(model: YOLO, n_samples: int, round_id: int):
+def push_update(model: YOLO, n_samples: int, round_id: int, train_results: Any):
     """
     上传本地更新到服务器
     
@@ -113,21 +114,40 @@ def push_update(model: YOLO, n_samples: int, round_id: int):
         model: 训练后的模型
         n_samples: 本地样本数
         round_id: 当前轮次
+        train_results: 本地训练结果对象
     """
     try:
         # 序列化 state_dict
         state_dict = model.model.state_dict()
         serialized = {k: v.cpu().tolist() for k, v in state_dict.items()}
         
+        # 计算上传比特数
+        _, bits_up_mb = compute_model_size(state_dict, bits=32) # 假设是32bit浮点数
+        bits_up = bits_up_mb * (1024 ** 2) * 8 # 转换为比特
+        
+        # 提取训练指标
+        metrics = {}
+        if hasattr(train_results, 'results_dict'):
+            results_dict = train_results.results_dict
+            metrics['map50'] = results_dict.get('metrics/mAP50(B)', 0.0)
+            metrics['map'] = results_dict.get('metrics/mAP50-95(B)', 0.0)
+            metrics['precision'] = results_dict.get('metrics/precision(B)', 0.0)
+            metrics['recall'] = results_dict.get('metrics/recall(B)', 0.0)
+            metrics['loss'] = results_dict.get('train/box_loss', 0.0) + \
+                              results_dict.get('train/cls_loss', 0.0) + \
+                              results_dict.get('train/dfl_loss', 0.0)
+        
         # 发送更新
         payload = {
             "client_id": CLIENT_ID,
             "state_dict": serialized,
             "n_samples": n_samples,
-            "round_id": round_id
+            "round_id": round_id,
+            "metrics": metrics,
+            "bits_up": bits_up
         }
         
-        _log(f"📤 上传本地更新...")
+        _log(f"📤 上传本地更新 (mAP50: {metrics.get('map50', 0.0):.3f}, Bits Up: {bits_up_mb:.2f} MB)...")
         response = requests.post(f"{SERVER_URL}/update", json=payload, timeout=60)
         if not response.ok:
             _log(f"⚠️  上传失败详情: {response.text}")
@@ -233,10 +253,10 @@ def start_client(client_id: int, server_url: str = None, config_path: Optional[s
                 continue
             
             # 2. 本地训练
-            train_local(model, current_round, config)
+            train_results = train_local(model, current_round, config)
             
             # 3. 上传更新
-            response = push_update(model, n_samples, current_round)
+            response = push_update(model, n_samples, current_round, train_results)
             
             # 更新轮次记录
             last_round = current_round

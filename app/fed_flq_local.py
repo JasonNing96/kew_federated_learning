@@ -146,18 +146,18 @@ def monitor_status_to_csv(
             if verbose:
                 print("[monitor] 访问 /status 失败，重试中 ...")
             continue
-        
+
         flat = flatten_dict(status)
         flat["timestamp"] = time.time()
         current_round = flat.get(round_key, last_round)
-        
+
         # 每当轮次变化时写一行
         if current_round != last_round:
             append_csv_row(csv_path, fieldnames, flat)
             last_round = current_round
             if verbose:
                 print(f"[monitor] 记录一条状态: {round_key}={current_round}")
-        
+
         # 结束条件：兼容多种字段名
         # - 旧约定：is_finished / finished / max_rounds
         # - 现有 server：training_done / total_rounds
@@ -165,7 +165,7 @@ def monitor_status_to_csv(
             if verbose:
                 print("[monitor] 检测到训练结束标志（is_finished/finished/training_done），停止监控")
             break
-        
+
         # 轮次上限：优先使用 max_rounds，其次 total_rounds
         max_rounds = status.get("max_rounds") or status.get("total_rounds")
         if max_rounds is not None and current_round >= max_rounds:
@@ -308,11 +308,11 @@ def plot_flq(csv_path: Path, out_dir: Path) -> None:
     # 2) 通信比特数曲线
     has_bits = False
     plt.figure()
-    if "bits_down" in df.columns:
-        plt.plot(x, df["bits_down"], marker="o", label="bits_down")
+    if "bits_down_total_round" in df.columns:
+        plt.plot(x, df["bits_down_total_round"], marker="o", label="bits_down")
         has_bits = True
-    if "bits_up" in df.columns:
-        plt.plot(x, df["bits_up"], marker="s", label="bits_up")
+    if "bits_up_total_round" in df.columns:
+        plt.plot(x, df["bits_up_total_round"], marker="s", label="bits_up")
         has_bits = True
 
     if has_bits:
@@ -327,15 +327,15 @@ def plot_flq(csv_path: Path, out_dir: Path) -> None:
         print(f"[plot] 保存图像: {fig_path}")
     else:
         plt.close()
-        print("[plot] CSV 中没有 bits_down/bits_up 列，跳过通信比特图。")
+        print("[plot] CSV 中没有 bits_down_total_round/bits_up_total_round 列，跳过通信比特图。")
 
     # 3) 如果既有 bits_* 又有精度列，可以画 “累计比特 – 精度” 曲线
     if has_bits and metric_cols:
         df["bits_total"] = 0.0
-        if "bits_down" in df.columns:
-            df["bits_total"] += df["bits_down"]
-        if "bits_up" in df.columns:
-            df["bits_total"] += df["bits_up"]
+        if "bits_down_total_round" in df.columns:
+            df["bits_total"] += df["bits_down_total_round"]
+        if "bits_up_total_round" in df.columns:
+            df["bits_total"] += df["bits_up_total_round"]
         df["bits_cumsum"] = df["bits_total"].cumsum()
 
         for col in metric_cols:

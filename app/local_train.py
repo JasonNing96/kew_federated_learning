@@ -3,6 +3,7 @@ FLQ-Fed 单节点训练脚本
 在本地同时运行 server 和 client，适合快速测试
 """
 import threading
+import multiprocessing
 import time
 import sys
 from pathlib import Path
@@ -20,8 +21,8 @@ def run_server_thread(config_path: str = None):
         pass
 
 
-def run_client_sequential(client_id: int, server_url: str, config_path: str = None):
-    """顺序运行客户端"""
+def run_client_process(client_id: int, server_url: str, config_path: str = None):
+    """在独立进程中运行客户端"""
     from app.client import start_client
     try:
         start_client(client_id, server_url, config_path)
@@ -69,22 +70,26 @@ def main():
         time.sleep(10)
         print("✅ 服务器已就绪\n")
         
-        # 2. 顺序启动客户端（一个接一个，避免资源竞争）
-        print(f"[2/2] 顺序启动 {args.clients} 个客户端...\n")
-        
+        # 2. 并行启动所有客户端（在独立进程中 - 真正的并行）
+        print(f"[2/2] 并行启动 {args.clients} 个客户端...\n")
+
+        client_processes = []
         for i in range(1, args.clients + 1):
-            print(f"\n{'='*70}")
-            print(f"🏃 运行客户端 #{i}")
-            print(f"{'='*70}\n")
-            
-            run_client_sequential(i, server_url, args.config)
-            
-            print(f"\n✅ 客户端 #{i} 完成")
-            
-            # 如果不是最后一个客户端，等待一下
-            if i < args.clients:
-                print("⏳ 等待 3 秒后启动下一个客户端...\n")
-                time.sleep(3)
+            print(f"🚀 启动客户端 #{i} (独立进程)")
+            process = multiprocessing.Process(
+                target=run_client_process,
+                args=(i, server_url, args.config)
+            )
+            process.start()
+            client_processes.append(process)
+            time.sleep(1)  # 稍微错开启动时间
+
+        print(f"\n✅ 所有 {args.clients} 个客户端已启动，等待训练完成...\n")
+
+        # 等待所有客户端完成
+        for i, process in enumerate(client_processes, 1):
+            process.join()
+            print(f"✅ 客户端 #{i} 已完成")
         
         print("\n" + "="*70)
         print("🎉 所有客户端训练完成！")
@@ -101,5 +106,7 @@ def main():
 
 
 if __name__ == "__main__":
+    # 对于 multiprocessing，需要设置启动方法
+    multiprocessing.set_start_method('spawn', force=True)
     sys.exit(main())
 

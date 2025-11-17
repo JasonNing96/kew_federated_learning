@@ -26,6 +26,8 @@ class UpdateRequest(BaseModel):
     state_dict: Dict[str, Any]  # 序列化的state_dict（支持任意嵌套）
     n_samples: int
     round_id: int
+    metrics: Optional[Dict[str, float]] = None  # 训练指标（mAP, loss等）
+    bits_up: Optional[float] = None # 客户端上传的模型比特数
 
 
 class StatusResponse(BaseModel):
@@ -36,6 +38,12 @@ class StatusResponse(BaseModel):
     buffered_updates: int
     clients_per_round: int
     waiting_for: int
+    # 训练指标
+    avg_map50: Optional[float] = None
+    avg_loss: Optional[float] = None
+    round_time: Optional[float] = None
+    bits_down_total_round: Optional[float] = None # 服务器下发模型总比特数
+    bits_up_total_round: Optional[float] = None # 客户端上传模型总比特数
 
 
 # ==================== 服务器状态 ====================
@@ -47,19 +55,23 @@ class ServerState:
         self.config = config
         self.model = initial_model
         self.global_state = initial_model.model.state_dict()
-        
+
         # 训练状态
         self.current_round = 0
         self.training_done = False
-        
+
         # 缓冲区
         self.update_buffer = []
         self.sample_counts = []
-        
+        self.metrics_buffer = []  # 存储每个客户端的指标
+        self.bits_up_buffer = [] # 存储每个客户端上传的比特数
+
         # 统计信息
         self.round_start_time = None
+        self.round_metrics = {}  # 每轮的平均指标
         self.total_params, self.model_size_mb = compute_model_size(self.global_state, 32)
-        
+        self.bits_down_per_round = 0 # 服务器下发模型大小（比特）
+
         print(f"[{self._ts()}] 📦 模型参数: {self.total_params:,} ({self.model_size_mb:.1f} MB)")
         print(f"[{self._ts()}] 🎯 训练目标: {config.rounds} 轮 × {config.clients_per_round} 客户端")
     
@@ -67,14 +79,18 @@ class ServerState:
         """时间戳"""
         return datetime.now().strftime('%H:%M:%S')
     
-    def add_update(self, state_dict: Dict, n_samples: int):
+    def add_update(self, state_dict: Dict, n_samples: int, metrics: Optional[Dict] = None, bits_up: Optional[float] = None):
         """添加客户端更新到缓冲区"""
         self.update_buffer.append(state_dict)
         self.sample_counts.append(n_samples)
-        
+        if metrics:
+            self.metrics_buffer.append(metrics)
+        if bits_up is not None:
+            self.bits_up_buffer.append(bits_up)
+
         waiting = self.config.clients_per_round - len(self.update_buffer)
         print(f"[{self._ts()}] 📥 收到客户端更新 ({len(self.update_buffer)}/{self.config.clients_per_round})")
-        
+
         if len(self.update_buffer) >= self.config.clients_per_round:
             self._aggregate_and_advance()
     
@@ -83,39 +99,92 @@ class ServerState:
         print(f"\n{'='*70}")
         print(f"[{self._ts()}] 🔄 聚合 Round {self.current_round}")
         print(f"{'='*70}")
-        
+
         # FedAvg 聚合
         self.global_state = fedavg_aggregate(self.update_buffer, self.sample_counts)
+
+        # 计算服务器下发模型大小
+        _, bits_down_mb = compute_model_size(self.global_state, bits=32) # 假设是32bit浮点数
+        self.bits_down_per_round = bits_down_mb * (1024 ** 2) * 8 # 转换为比特
+
+        # 聚合客户端指标和通信量
+        round_metrics = {}
+        if self.metrics_buffer:
+            for key in self.metrics_buffer[0].keys():
+                values = [m.get(key, 0.0) for m in self.metrics_buffer]
+                round_metrics[key] = sum(values) / len(values)
         
+        if self.bits_up_buffer:
+            round_metrics['bits_up_total_round'] = sum(self.bits_up_buffer)
+        round_metrics['bits_down_total_round'] = self.bits_down_per_round
+
+        self.round_metrics[self.current_round] = round_metrics
+        print(f"📊 平均指标: mAP50={round_metrics.get('map50', 0.0):.4f}, Loss={round_metrics.get('loss', 0.0):.4f}")
+        print(f"⬆️  本轮上传总比特: {round_metrics.get('bits_up_total_round', 0.0):.2f}")
+        print(f"⬇️  本轮下发总比特: {round_metrics.get('bits_down_total_round', 0.0):.2f}")
+
         # 保存checkpoint
         save_dir = Path(self.config.server_save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_path = save_dir / f"global_round_{self.current_round + 1}.pt"
         torch.save(self.global_state, checkpoint_path)
-        
+
         # 统计信息
         round_time = (datetime.now() - self.round_start_time).total_seconds() if self.round_start_time else 0
         compress_ratio = compute_compression_ratio(32, self.config.quant_bits if self.config.quant_enabled else 32)
-        
+
         print(f"⏱️  轮次时间: {round_time:.1f}s")
         print(f"💾 Checkpoint: {checkpoint_path}")
         print(f"🗜️  压缩率: {compress_ratio:.2f}x")
         print(f"{'='*70}\n")
-        
+
         # 清空缓冲区并推进
         self.update_buffer.clear()
         self.sample_counts.clear()
+        self.metrics_buffer.clear()
+        self.bits_up_buffer.clear()
         self.current_round += 1
         self.round_start_time = datetime.now()
-        
+
         # 检查是否完成
         if self.current_round >= self.config.rounds:
             self.training_done = True
             print(f"🎉 所有训练轮次已完成！")
+            self._save_metrics_to_csv()
     
     def get_global_model(self) -> tuple:
         """获取全局模型"""
         return self.global_state, self.current_round, self.training_done
+
+    def _save_metrics_to_csv(self):
+        """保存训练指标到CSV文件"""
+        import csv
+
+        csv_path = Path(self.config.server_save_dir) / "training_metrics.csv"
+        csv_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with open(csv_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            # 动态生成表头
+            if not self.round_metrics:
+                writer.writerow(['round'])
+                return
+            
+            first_round_metrics = next(iter(self.round_metrics.values()))
+            fieldnames = ['round'] + sorted(first_round_metrics.keys())
+            writer.writerow(fieldnames)
+
+            for round_id, metrics in self.round_metrics.items():
+                row = [round_id] + [metrics.get(key, '') for key in sorted(first_round_metrics.keys())]
+                writer.writerow(row)
+
+        print(f"\n📊 训练指标已保存到: {csv_path}")
+
+    def get_current_metrics(self) -> Dict:
+        """获取当前轮次的指标"""
+        if self.current_round > 0 and (self.current_round - 1) in self.round_metrics:
+            return self.round_metrics[self.current_round - 1]
+        return {}
 
 
 # ==================== FastAPI 应用 ====================
@@ -133,13 +202,21 @@ def create_app(config: Config, initial_model) -> FastAPI:
     @app.get("/status", response_model=StatusResponse)
     def get_status():
         """获取服务器状态"""
+        current_metrics = state.get_current_metrics()
+        round_time = (datetime.now() - state.round_start_time).total_seconds() if state.round_start_time else 0.0
+
         return StatusResponse(
             current_round=state.current_round,
             total_rounds=state.config.rounds,
             training_done=state.training_done,
             buffered_updates=len(state.update_buffer),
             clients_per_round=state.config.clients_per_round,
-            waiting_for=state.config.clients_per_round - len(state.update_buffer)
+            waiting_for=state.config.clients_per_round - len(state.update_buffer),
+            avg_map50=current_metrics.get('map50'),
+            avg_loss=current_metrics.get('loss'),
+            round_time=round_time,
+            bits_down_total_round=current_metrics.get('bits_down_total_round'),
+            bits_up_total_round=current_metrics.get('bits_up_total_round')
         )
     
     @app.get("/global")
@@ -161,15 +238,15 @@ def create_app(config: Config, initial_model) -> FastAPI:
         """接收客户端更新"""
         if state.training_done:
             return {"success": True, "message": "训练已完成", "done": True}
-        
+
         # 反序列化 state_dict
         state_dict = {
             k: torch.tensor(v) for k, v in request.state_dict.items()
         }
-        
-        # 添加更新
-        state.add_update(state_dict, request.n_samples)
-        
+
+        # 添加更新（包括指标和比特数）
+        state.add_update(state_dict, request.n_samples, request.metrics, request.bits_up)
+
         return {
             "success": True,
             "round": state.current_round,
