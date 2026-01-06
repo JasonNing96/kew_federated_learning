@@ -1,0 +1,660 @@
+
+\section{面向海事弱连通环境的系统感知学习架构与通信优化}
+% 这里可能我们要换个名字
+\subsection{引言：海事 DIL 环境下的协同学习挑战}
+\label{sec:introduction_2.1}
+% 人工智能 -> 航运业务保障
+\subsubsection{研究背景与动机}
+如第~\ref{sec:introduction}章所述，海事受限边缘网络在弱连通（DIL）、强动态拓扑和节点资源受限等多重约束下，智能化业务的长期运行依赖于模型在端—边—云中的持续演进与部署。本章在此基础上，将视角聚焦于\textbf{训练学习阶段}，重点讨论在海事边缘环境中如何构建弱网条件下长期运行的分布式协同学习机制。
+
+围绕“智能航运保障”这一目标，当前行业内已在避碰控制、搜救调度和通信优化等方面积累了较多基础工作。例如，基于规则或深度强化学习的避碰算法~\upcite{yinjun_bipeng,guanwei_ddpg}，依托指挥平台的搜救调度与编队协同~\upcite{blockchain_uav}，以及基于 5G 的航运通信网络优化方案~\upcite{5G_congress} 等。这些技术使得无人艇、无人机与岸基指挥系统之间能够实现更高效的协同，但整体上仍呈现\textbf{孤岛式}或\textbf{单点式}的智能化特征，缺乏面向海事复杂异构场景的\textbf{全局协同感知}与模型的\textbf{持续演进}能力。要支撑未来高密度、多任务的智能航运业务，单点算法优化已难以满足需求，更需要在靠近数据源的一侧构建稳定可用的边缘学习体系。
+%本文在此背景下，将“智能航运保障”确定为统一应用场景与后续研究的锚点。
+
+从计算模式演进来看，云原生与多接入边缘计算（MEC）的结合，使“就近计算、上下文感知、动态卸载”成为可能。通过容器化与微服务架构，模型可以在不同节点之间快速迁移并按需扩缩容，形成“感知—计算—决策”的边缘闭环~\upcite{2016Fog}。然而，将这一范式直接迁移至海事环境时，会遇到几类约束：海上链路长期处于“间歇、低带宽、高时延”（DIL）状态，跨 VHF/微波/卫星链路频繁切换且抖动明显；节点分布稀疏、运动性强，拓扑随海况与任务持续变化；端侧设备算力与能量受限，断连期难以支撑复杂训练；数据分散在多船、多平台与不同运营主体之间，存在主权与隐私约束，难以集中汇聚。
+
+在“边缘优先”的前提下，\textbf{如何组织数据并持续训练模型}成为关键问题。一方面，海事数据天然呈现“多源异构、空间分散、Non-IID”特征，各节点采集到的样本分布差异较大，且难以在不触碰隐私与主权边界的前提下集中上云。另一方面，弱连通链路无法承载大规模原始数据回传，集中式训练模式在这种环境下几乎不可行。为此，需要一种能够在不迁移原始数据的前提下，使各边缘节点协同提升全局模型性能的学习范式。
+
+联邦学习（Federated Learning, FL）正是在这一背景下被引入边缘场景。它允许各节点在本地训练模型，并周期性上传参数或梯度更新，服务器端完成聚合后再下发新一轮模型，从而实现“数据不动、模型流动”的协同训练模式~\upcite{chen2020flsurvey}。对于海事业务而言，联邦学习的优势在于：尊重数据主权、降低原始数据回传量，并在一定程度上适应 Non-IID 数据分布。然而，一旦将 FL 部署在 DIL 环境中，弱连通与资源约束会直接体现在以下几个方面：
+
+\begin{itemize}
+	\item \textbf{通信瓶颈：} 模型参数与梯度的上下行交换在低带宽环境中代价高昂，高频聚合与重传极易挤占业务流量。
+	\item \textbf{算力瓶颈：} 端侧设备算力与能量存在显著差异，难以长期维持高负载训练，参与节点集合随时间波动，训练节奏不稳定。
+	\item \textbf{协同瓶颈：} 链路中断与时延波动导致参与节点的可用性与上传时刻不一致，聚合轮次容易失衡，进而影响收敛效率与最终精度。
+\end{itemize}
+
+这些问题表明，在海事受限边缘环境中，分布式学习不再是简单将 FL 算法“搬到边缘”即可解决，而是需要结合底层系统状态，对通信与计算进行联合建模与协同控制。本章正是围绕这一点展开：在不改变联邦学习基本聚合机制的前提下，将系统状态感知与量化控制纳入统一框架，使学习过程能够在 DIL 条件下长期、稳定地运行。
+
+为此，本章提出\textbf{系统感知的联邦低位宽量化边缘学习架构（System-Aware Federated Low-bitwidth Quantization, SA-FLQ）}。该架构在不改变联邦学习基本聚合机制的前提下，将系统状态感知与量化控制纳入统一优化体系，实现通信、计算与能耗的协同自适应控制机制。
+
+算法层面，SA-FLQ 通过“低位宽参数广播—自适应梯度量化”的系统级调度与控制的闭环机制，有效缓解 DIL 网络下的带宽瓶颈与异步聚合问题。下行方向采用低位宽参数封装，以保证全局模型对齐与数值稳定。上行方向根据节点状态与训练轮次动态调整量化精度，在截止时间与误差约束下最小化通信比特和端到端时延。与传统高精度模型传输或稀疏更新方法相比，该策略对聚合流程无侵入，能够在保持收敛性的同时显著降低通信与计算负载。
+
+系统层面，SA-FLQ 依托云原生技术栈实现“边缘优先”的运行方式。以 Kubernetes 为编排核心，结合 KubeEdge 的 CloudCore/EdgeCore、设备孪生和消息通道模块，构建了支撑弱连接与移动性的统一执行环境。系统接口划分为两类：一类为\textbf{可控量}，用于下发参与集合、局部迭代步长、截止时间和上下行位宽等策略参数。另一类为\textbf{可观测量}，用于实时采集通信比特量、轮次时延、能耗和模型精度等指标，并回写至控制层。该架构通过“观测—控制—执行—回写”的系统闭环运行机制，将联邦训练过程由单一算法流程扩展为\textbf{系统可感知、可计量、可优化}的整体协同过程。
+
+\subsubsection{本章创新性}
+本章面向海事弱连接链路、异构算力差异和数据主权约束等问题，在系统架构与联邦学习算法两个层面提出\textbf{系统感知的低位宽联邦学习边缘架构}（SA-FLQ）。该架构通过统一的系统感知接口和可调量化机制，将通信、计算与收敛行为纳入同一优化闭环，形成“系统可感知、量化可调、训练可计量”的协同体系。主要创新点如下。
+
+\begin{itemize}
+	\item \textbf{架构创新}：在“计算–编排–网络”三层视角下，设计面向海事场景的系统感知边缘架构。基于 Kubernetes 与 KubeEdge 搭建容器化边缘集群，支持服务发现、快速部署、路由管理、设备孪生和弱连接条件下的自治运行。将链路状态和算力状态抽象为统一的\emph{可观测量}，将训练过程中的参与集合、本地迭代轮数、截止时间以及上下行位宽等抽象为\emph{可控量}，为系统感知的联邦学习提供规范化的执行入口和度量口径，实现平台与算法之间的紧密耦。
+		
+	\item \textbf{算法创新}：在不改变联邦学习基本聚合流程的前提下，提出系统感知的低位宽联邦学习算法 SA-FLQ。下行方向采用固定低位宽作为参数广播的基线位宽，保证全局模型在各节点的一致对齐与数值稳定。上行方向根据节点可观测状态和训练轮次自适应选择量化位宽，将上行通信比特和上传时延显式纳入优化目标，并与参与集合和本地训练步长协同调节。相较于全精度上传或仅依赖降频、稀疏更新的方案，该策略在 Non-IID 数据分布和节点可用性波动条件下，能够在更低通信开销下保持稳定的收敛性能。
+	
+	\item \textbf{实验创新：} 构建了“仿真—实机”一体化的验证体系，在受控 Non-IID（Dirichlet $\alpha=0.1$）场景下，系统评估 SA\mbox{-}FLQ 的收敛与通信特性，在精度93\%的保持下，可将上行通信比特量级显著压缩。进一步地，由 1 台 x86 服务器与多台 Jetson Nano 组成的 KubeEdge 异构边缘集群上，部署油污检测联邦训练任务，SA\mbox{-}FLQ 可在保持最终检测精度不低于全精度 FedAvg 的前提下，将总通信量削减约 75\%，并明显缩短单轮训练时延，形成了平台与算法协同优化的端到端证据支撑。
+\end{itemize}
+
+\subsection{边缘计算与联邦学习基础}
+\label{sec:preliminaries}
+本节提出的海事边缘协同学习架构涉及移动边缘计算、云原生技术与分布式机器学习的深度融合。为构建系统建模与算法设计的理论基石，本小节从计算范式、架构方法与算法原理三个维度梳理相关基础理论。
+
+\subsubsection{移动边缘计算定义}
+随着物联网设备数量的激增与数据产生量的爆发，传统“端侧采集—云端处理”的集中式计算模式逐渐暴露出回传带宽不足、隐私泄露风险高以及实时性难以保障等问题。移动边缘计算（MEC）作为一种新兴计算范式应运而生，其核心思想是将计算、存储与网络能力从中心云下沉至无线接入网边缘，为终端用户提供低时延、高带宽的本地化服务~\upcite{MEC_Suervey_1,2016Fog}。
+
+在 MEC 体系中，\textbf{端—边—云协同}是典型的架构形态：
+\begin{itemize}
+	\item \textbf{端：} 负责数据的感知与轻量预处理，受限于能耗与算力，难以独立承载复杂任务。
+	\item \textbf{边：} 部署于基站、网关或汇聚节点，提供介于端与云之间的中等算力，是实时任务处理与局部数据聚合的核心载体。
+	\item \textbf{云：} 拥有海量算力与存储，负责全局的大数据分析、长周期模型训练与策略管控。
+\end{itemize}
+
+近年来，人工智能与边缘计算的深度融合催生了边缘智能~\upcite{Edge_inttelligence}（Edge Intelligence）。边缘节点通过部署深度学习模型为终端提供低时延推理服务。边缘计算资源本身也被用于支撑分布式模型训练与持续演进（Edge for AI）。边缘智能通过“数据本地化”和“计算近端化”，为弱连通（DIL）环境下智能化业务的连续性提供了重要理论支撑。
+
+\subsubsection{云原生边缘计算架构与协同机制}
+边缘计算环境具有显著的异构性和动态性，传统的嵌入式开发与手工运维模式难以满足应用快速迭代与跨平台迁移的需求。云原生（Cloud-Native）技术凭借容器化、微服务与声明式编排等特性，被引入边缘计算领域，形成云原生边缘计算的新型架构范式~\upcite{fan2020scheduler}。
+
+云原生边缘计算的核心价值在于通过\textbf{云边协同}屏蔽底层基础设施的复杂性：
+\begin{itemize}
+	\item \textbf{容器化封装：} 利用容器技术将 AI 模型及其依赖环境打包为标准镜像，实现“一次构建，随处运行”，缓解了海事场景中 x86 服务器与 ARM 边缘设备（如 Jetson Nano）之间的兼容性问题。
+	\item \textbf{统一编排调度：} 以 Kubernetes（K8s）为代表的编排引擎，将离散的边缘节点抽象为统一资源池，通过声明式 API 自动完成应用的部署、扩缩容与故障恢复，显著降低了大规模分布式系统的运维复杂度。
+	\item \textbf{状态与配置的集中管理：} 通过 ConfigMap、Secret、Service 等抽象，实现配置与服务发现的统一管理，便于在动态网络环境中维护应用一致性。
+\end{itemize}
+
+作为云原生边缘计算的典型参考实现，KubeEdge 在 Kubernetes 控制面的基础上进行边缘化改造，通过 CloudCore 与 EdgeCore 之间的双向多路复用通道，将云端控制平面延伸至边缘。 其设备孪生设计与本地元数据持久化机制，使边缘节点在与云端断连的情况下仍可维持一定程度的自治运行。这一特性与海事 DIL 环境中“间歇性连接”的链路特征高度契合，为本章后续构建的海事边缘协同学习架构提供了工程底座。
+
+\subsubsection{联邦学习基础}
+为应对数据孤岛与隐私保护需求，文献~\cite{mcmahan2017fedavg}提出了一种“数据不动、模型流动”的分布式学习范式—联邦学习~\upcite{chen2020flsurvey}（FL）。考虑由 $\mathcal{M}=\{1,\ldots,M\}$ 个客户端组成的系统，每个客户端 $m$ 持有本地数据集 $\mathcal{D}_m$，其经验风险记为：
+\begin{equation}
+	F_m(\mathbf{w}) = \frac{1}{|\mathcal{D}_m|}\sum_{(\mathbf{x},y)\in\mathcal{D}_m}
+	\ell\big(f(\mathbf{x};\mathbf{w}),y\big),
+\end{equation}
+其中 $\mathbf{w}$ 为待优化的模型参数，$\ell(\cdot)$ 为损失函数。全局优化目标为加权经验风险最小化：
+\begin{equation}
+	\min_{\mathbf{w}} F(\mathbf{w}) = \sum_{m=1}^{M}p_m F_m(\mathbf{w}), \quad
+	p_m = \frac{|\mathcal{D}_m|}{\sum_{k=1}^{M}|\mathcal{D}_k|}.
+	\label{eq:fl_global_objective}
+\end{equation}
+
+经典的联邦平均（FedAvg）算法在单轮 $t$ 的流程可概括为“广播—更新—聚合”：
+\begin{itemize}
+	\item \textbf{模型广播：} 服务器选择参与集合 $\mathcal{S}_t\subseteq\mathcal{M}$，向其中每个客户端广播当前全局模型参数 $\mathbf{w}_t$。
+	\item \textbf{本地更新：} 每个参与客户端 $m$ 以 $\mathbf{w}_t$ 为初始值，基于本地数据执行 $I_{\text{loc}}$ 轮随机梯度下降，或小批量 SGD，得到更新后的本地模型 $\mathbf{w}_{m,t+1}$。
+	\item \textbf{模型聚合：} 服务器收集各客户端上传的本地模型或参数增量，按样本数加权平均得到新的全局模型：
+	\begin{equation}
+		\mathbf{w}_{t+1} = \sum_{m\in\mathcal{S}_t}\frac{|\mathcal{D}_m|}{\sum_{k\in\mathcal{S}_t}|\mathcal{D}_k|}\,\mathbf{w}_{m,t+1}.
+		\label{eq:fedavg_aggregation}
+	\end{equation}
+\end{itemize}
+
+尽管 FedAvg 为分布式协同提供了基础范式，但在海事边缘场景下，其性能仍面临两大严峻挑战。
+
+\textbf{一是通信开销瓶颈}，传统 FedAvg 需传输全精度参数，这在受限带宽下不仅导致时延过高，还易引发更新超时。为缓解此问题，学术界提出了多种梯度压缩算法：Bernstein 等人提出的 SignSGD~\upcite{Bernstein_2018_SignSGD} 通过仅传输梯度符号实现 1-bit 极限压缩。Wen 等人设计的 TernGrad~\upcite{Wen_2017_TernGrad} 使用三值量化进一步降低了通信方差。以及Lin 等人提出的 DGC~\upcite{Lin_2018_DGC} 算法则通过动量修正与稀疏化，仅传输重要梯度以节省带宽。然而，这些方法通常假设网络状态相对稳定，缺乏对海事 DIL 环境中动态带宽与丢包的实时感知能力。
+
+\textbf{二是数据异构（Non-IID）挑战}，海事节点采集的数据在空间分布上存在显著差异，导致本地梯度更新方向发散，严重拖慢全局收敛。Li 等人~\upcite{Li_2020_FedAvg_NonIID} 从理论上证明了 Non-IID 数据会导致 FedAvg 的收敛界恶化，且与异构程度呈正相关。Karimireddy 等人提出的 SCAFFOLD~\upcite{Karimireddy_2020_SCAFFOLD} 引入控制变量（Control Variates）来修正客户端漂移（Client Drift）。尽管这些理论工作提供了收敛保证，但在计算资源受限的边缘设备上，高复杂度的修正算法往往难以实时运行。
+
+因此，如何在保证收敛性能的前提下，设计一种\textbf{系统感知（System-Aware）}的轻量化量化策略，成为实现高效海事边缘协同学习的关键。
+
+%在理想通信与独立同分布（IID）数据条件下，FedAvg 已被证明能够收敛至全局最优或次优解~\upcite{mcmahan2017fedavg}。然而，标准 FedAvg 假设通信链路稳定且带宽充足，且直接传输全精度模型参数。在实际边缘计算场景中，受限的上行带宽与异构的节点资源往往成为制约训练效率的瓶颈。因此，如何在保证收敛性能的前提下降低通信开销，是实现高效边缘协同学习的关键。
+
+\subsection{船-岸协同的边缘系统架构与建模} \label{sec:kew}
+第~\ref{sec:preliminaries} 节介绍了移动边缘计算范式与联邦学习基础理论的基础，本节针对海事 DIL 环境的特殊约束，提出\textbf{系统感知的边缘协同学习架构（KubeEdge Wireless, KEW）}。
+
+本研究将 KEW 定位为\textbf{“海事边缘智能的参考架构与原型系统”}。其设计目标具有双重性：
+\begin{itemize}
+	\item \textbf{理论范式（Paradigm）：} 确立“可观测—可控制”的\textbf{通用接口规范}。这一规范不仅服务于本章的模型训练，也为后续关于\textbf{资源编排协同推理}的算法建模提供了统一的逻辑底座与状态空间定义。
+	
+	\item \textbf{工程验证（Prototype）：} 针对本章关注的“协同学习”挑战，基于 KubeEdge 构建物理原型系统，重点验证“系统感知接口”在\textbf{联邦学习任务}中的工程可行性与通信优化效果。
+\end{itemize}
+
+基于此，本节首先定义标准化的系统感知接口，随后给出 KEW 的三层架构设计，并最终建立面向协同学习的系统模型。
+
+\subsubsection{信道与能效状态的联合感知模型：可观测量与可控量} \label{sec:interface}
+
+为了将物理层的环境波动与上层的算法决策建立数学映射，KEW 平台定义了标准化的\textbf{系统感知接口}。本小节给出后续算法中统一使用的可观测量与可控量记号。
+
+\textbf{（1）可观测量（Observable Variables）}
+
+由网络层与节点侧实时采集并上浮至编排层的状态向量定义为 $\boldsymbol{\omega}_{m,t}$：
+\begin{equation}
+	\boldsymbol{\omega}_{m,t} = \big[ R_{\text{down},m}(t), R_{\text{up},m}(t), \mathrm{RTT}_{m}(t), f_{m}(t), E_{m}(t) \big].
+	\label{eq:kew-omega}
+\end{equation}
+其中，$m \in \mathcal{M}$ 为节点索引；$R_{\text{down},m}(t)$ 与 $R_{\text{up},m}(t)$ 为在统计窗口 $\Delta T$ 内按应用层有效吞吐估计的上下行速率（Mbps），$\mathrm{RTT}_{m}(t)$ 为往返时延（ms）。$f_{m}(t)$ 为节点可用计算频率（Hz），$E_{m}(t)$ 为节点当前剩余能量（J）。这些变量作为 SA-FLQ 算法决策的输入，反映当前链路与节点的系统态势。
+
+\textbf{（2）可控量（Controllable Variables）}
+
+由任务编排层决策并下发至端侧的控制向量在第 $t$ 轮记为 $\mathbf{u}_t$：
+\begin{equation}
+	\mathbf{u}_t = \big( \mathcal{S}_t,\ I_{\text{loc},t},\ \tau_t,\ b_{\text{down}}(t),\ b_{\text{up}}(t) \big).
+	\label{eq:kew-u}
+\end{equation}
+其中，$\mathcal{S}_t \subseteq \mathcal{M}$ 为本轮被选中参与训练的设备集合。$I_{\text{loc},t}$ 为端侧本地训练的迭代轮数（Local Epochs）。$\tau_t$ 为本轮回合截止时间（Deadline），$b_{\text{down}}(t)$ 与 $b_{\text{up}}(t)$ 分别为当轮参数广播与梯度上传的量化位宽（bits/element）。在 DIL 条件下，端侧设备根据上述指令动态调整计算与通信行为，实现资源的时空适配。
+
+\subsubsection{系统感知的边缘协同架构设计} \label{sec:kew_arch}
+%本小节详细阐述系统感知的边缘协同学习架构（KEW）的实现机制与运行流程。该架构以 KubeEdge 为工程底座，在不改变云原生控制范式的前提下，面向海事 DIL 条件扩展了“感知—控制”闭环，将“可观测—可执行—可回写”机制落地为稳定的系统接口。
+
+本小节详细阐述\textbf{部署于海事边缘侧节点} 的\textbf{系统感知协同架构：kubedge wireless, KEW}。须明确的是，KEW 并非对“云—边—端”物理拓扑的重构，而是以 KubeEdge 为底座的边缘侧功能增强。它作为一个“系统感知中间件”，核心职能在于打破边缘设备对北向 DIL 信道的“黑盒”状态，通过引入对链路波动的实时感知与对本地计算资源的精细编排，在边缘侧构建了独立的“观测—控制”闭环。
+
+如图~\ref{fig:kew_layer_flow} 所示，系统感知边缘平台可抽象为三类层级与接口：
+\begin{itemize}
+	\item \textbf{计算层（Edge Service）：} 位于架构顶层，承载具体的推理与训练工作负载。该层通过标准接口按训练回合读取编排层下发的控制参数，执行低位宽计算任务，并实时回写运行度量（如 Loss、计算耗时），形成应用层的反馈闭环。
+	
+	\item \textbf{任务编排层（EdgeCore）：} 作为边缘节点的决策核心，负责接收上层算法（或云端）给出的控制意图，并将其映射为具体的容器安置、资源配额与带宽管理策略。同时，该层利用元数据持久化机制提供断连自治能力，在弱网环境下保障策略缓存与服务连续性。
+	
+	\item \textbf{网络层（Wireless Link）：} 位于架构最底层，负责聚合卫星、微波与 VHF 等多制式接入，并维护会话连续与策略路由。其核心职能是\textbf{“北向感知”}，即实时采集底层物理信道的有效带宽、往返时延、丢包率及节点能耗状态，并将其封装为标准化的\textbf{可观测量 $\boldsymbol{\omega}$}。
+\end{itemize}
+
+%\vspace{-2mm}
+\begin{figure}[!hbtp]
+	\centering
+	\includegraphics[width=\linewidth]{figures/fig_kew_flq/kew_layer_flow.png}
+	\bicaption[KEW 平台三层架构与海事业务运行示意图]%
+	{KEW 平台中计算层（Edge Service）、任务编排层（EdgeCore）、网络层（Wireless Link）与物理设备之间的三层架构及其信号流、数据流运行流程示意图。虚线表示控制与状态信号流，实线表示模型参数与业务数据在各层之间的传递路径。}%
+	{Three-layer architecture and run-time workflow of the KEW platform, illustrating the interactions among the edge service, task orchestration layer, wireless link, and physical devices. Dashed arrows denote control and state signals flow, while solid arrows represent the flow of model parameters and task data across layers.}
+	\label{fig:kew_layer_flow}
+\end{figure}
+
+KEW 的运行流程如图~\ref{fig:kew_layer_flow} 所示，通过\textbf{“信号流”}与\textbf{“数据流”}的交织，在\textbf{“云—边—端”}物理实体之间构建了紧密的协同闭环。
+
+系统启动时，位于边缘节点的\textbf{网络层}，首先向北向的云端服务发起注册，并建立基础遥测通道。网络层实时采集 DIL 链路的物理状态，将其抽象为可观测量 $\boldsymbol{\omega}$，并通过内部总线上报至\textbf{任务编排层}。这一过程确立了系统对环境的“感知基准”。
+
+\textbf{计算层}根据业务需求向编排层提出服务请求。编排层作为决策中枢，一方面接收来自\textbf{云端}的全局模型参数 $\mathbf{w}_t$，另一方面结合本地感知的 $\boldsymbol{\omega_{m,t}}$，解算出当前时刻的最优控制向量 $\mathbf{u}_t$。随即，编排层将 $\mathbf{u}_t$ 通过虚线信令通道下发至计算层，完成“决策闭环”。
+
+在接收到控制指令后，计算层激活训练容器，建立与南向\textbf{端设备}的数据通路。本地传感器采集的原始数据 $D_m$ 直接注入计算层，在 $\mathbf{u}_t$ 约束下执行低位宽前向与反向计算，生成本地模型更新 $\mathbf{W}_{t+1}$。
+ 
+计算层输出的更新参数 $\mathbf{W}_{t+1}$ 经由网络层（$L_1$）进行\textbf{自适应量化处理 $Q(\mathbf{W}_{t+1}; b)$}。网络层根据当前的 DIL 链路状态，驱动物理接口将压缩后的梯度回传至云端服务器进行全局聚合。至此，一轮完整的“感知—决策—执行—反馈”协同周期结束。
+
+特别地，图中编排层与本地数据库之间的\textbf{灰色双向箭头}代表了“断连自治”机制。当北向云端链路中断时，编排层自动接管控制权，利用本地缓存的历史策略与模型副本维持计算层的持续运行，待链路恢复后自动触发状态同步，从而保障了海事弱网下的业务连续性。
+
+
+\subsubsection{系统建模与问题描述} \label{sec:modeling}
+
+基于第 \ref{sec:preliminaries} 节定义的联邦学习全局优化目标 $\min_{\mathbf{w}} F(\mathbf{w})$，在海事 DIL 场景中，系统面临通信受限与节点异构的双重约束。本节结合 KEW 接口定义，建立面向通算资源协同的系统模型。
+
+\paragraph{海事 DIL 场景下的时延与能耗模型}
+在海事弱连通环境中，单轮训练的总时延 $T_{\text{round}}(t)$ 由下行参数广播、端侧本地计算与上行梯度传输三部分构成，且受限于最慢节点（Straggler）：
+\begin{equation} 
+	T_{\text{round}}(t) = \max_{m \in \mathcal{S}_t} \left\{ T_{\text{down},m}(t) + T_{\text{cmp},m}(t) + T_{\text{up},m}(t) \right\} + T_{\text{agg}},
+	\label{eq:t_round} 
+\end{equation}
+其中 $T_{\text{agg}}$ 为服务器聚合时延（通常可忽略）。结合接口定义，各部分时延与系统变量（$\boldsymbol{\omega}_{m,t}, \mathbf{u}_t$）的显式关系如下：
+
+\begin{itemize}
+	\item \textbf{下行广播时延 $T_{\text{down},m}(t)$：} 取决于全局模型参数维度 $D_{\text{model}}$（Elements）、下行量化位宽 $b_{\text{down}}(t)$（bits/element）与下行有效速率：
+	\begin{equation} T_{\text{down},m}(t) = \frac{D_{\text{model}} \cdot b_{\text{down}}(t)}{R_{\text{down},m}(t)}. 
+	\end{equation}
+	
+	\item \textbf{本地计算时延 $T_{\text{cmp},m}(t)$：} 取决于本地样本数量 $S_m$（Samples）、本地训练轮数 $I_{\text{loc},t}$、单样本计算复杂度 $C_{\text{comp}}$（Cycles/Sample）与节点可用计算频率 $f_m(t)$：
+	\begin{equation} 
+		T_{\text{cmp},m}(t) = \frac{I_{\text{loc},t} \cdot S_m \cdot C_{\text{comp}}}{f_m(t)}. 
+	\end{equation}
+	
+	\item \textbf{上行传输时延 $T_{\text{up},m}(t)$：} 取决于梯度向量维度 $D_{\text{grad}}$（Elements）、上行量化位宽 $b_{\text{up}}(t)$（bits/element）与上行有效速率：
+	\begin{equation} 
+		T_{\text{up},m}(t) = \frac{D_{\text{grad}} \cdot b_{\text{up}}(t)}{R_{\text{up},m}(t)}. 
+	\end{equation}
+\end{itemize}
+
+相应地，节点 $m$ 在第 $t$ 轮的总能耗 $E^{\text{total}}_m(t)$ 包括计算能耗与通信能耗，需满足节点剩余能量约束：
+\begin{equation}
+	E^{\text{total}}_m(t) = \kappa f_m^2(t) \cdot T_{\text{cmp},m}(t) \cdot f_m(t) + P_{\text{tx}} \cdot T_{\text{up},m}(t) \le E_m(t),
+	\label{eq:energy_constraint}
+\end{equation}
+其中 $\kappa$ 为芯片能效系数，$P_{\text{tx}}$ 为发射功率。
+
+\paragraph{优化目标}
+综合上述分析，海事边缘协同学习的核心挑战在于：如何在满足严格的时延与能耗约束下，通过调节控制向量 $\mathbf{u}_t$，最小化全局模型的收敛误差。该问题建模为如下受限优化问题：
+\begin{align}
+	\min_{\mathbf{u}_t} \quad & \mathbb{E}\big[F(\mathbf{w}_{t+1})\big] \label{eq:optimiza_target_fed} \\
+	\text{s.t.} \quad 
+	& T_{\text{round}}(t) \le \tau_t, \notag \\
+	& E^{\text{total}}_m(t) \le E_m(t), \quad \forall m \in \mathcal{S}_t. \notag
+\end{align}
+
+该优化目标体现了\textbf{“通信、计算、精度”之间的三角博弈}：降低量化位宽 $b_{\text{up}}(t)$、$b_{\text{down}}(t)$ 可以显著缩短通信时延 $T_{\text{up},m}(t)$ 与 $T_{\text{down},m}(t)$，从而满足截止期 $\tau_t$，但会引入量化噪声，可能导致模型精度 $F(\mathbf{w})$ 恶化。后续的 SA-FLQ 算法将针对此问题，设计自适应的通算资源编排策略。
+
+\subsection{系统感知的联邦低位宽自适应量化算法 (SA-FLQ)} \label{sec:modeling_block_ch2}
+在前文的系统建模中，我们基于“系统感知”接口给出了可观测量 $\boldsymbol{\omega}_{m,t}$ 与可控量 $\mathbf{u}_t$，并将回合时延与能耗约束纳入全局目标的优化框架。海事 DIL 场景下，联邦学习的主要瓶颈来自通信受限与节点异构：$\boldsymbol{\omega}_{m,t}$ 显示上下行速率与往返时延高度非平稳，丢包概率显著。$\mathbf{u}_t$ 中的参与集合、回合时限与位宽策略直接决定训练闭环能否在受限带宽与能量预算下稳定推进。若沿用全精度参数同步，通信比特将快速累积，回合时延上升，端侧能耗不均衡，最终削弱全局收敛效率。
+
+为应对上述约束，本文提出\textbf{系统感知的联邦低位宽自适应量化算法（SA-FLQ）}。SA-FLQ 不改变“参数广播—本地更新—聚合”的基本流程，而是在既有闭环中嵌入位宽自适应与量化算子设计，通过与 $\boldsymbol{\omega}_{m,t}$ 联动调整 $\mathbf{u}_t$ 中的位宽与参与策略，在保证收敛性的前提下同时降低通信时延与端侧计算负担。算法设计遵循以下原则：
+\begin{itemize}
+	\item \textbf{下行一致性}：优先保障参数对齐与聚合稳定，控制下发参数的量化失真。
+	\item \textbf{上行自适应压缩}：依据链路与能耗态势动态选择上行位宽，在可用性与收敛之间取得平衡。
+	\item \textbf{端侧轻量}：端侧采用低位宽计算与存取，降低局部计算时延与能耗峰值。
+	\item \textbf{接口协同}：位宽与参与集合等控制量由任务编排层依据 $\boldsymbol{\omega}_{m,t}$ 自适应下发，并与网络策略协同执行与回写。
+\end{itemize}
+
+基于此，本节将详细阐述低位宽参数广播下行设计、上行通道优化模块设计以及面向时延与能耗约束的联动编排策略。
+
+\subsubsection{低位宽参数广播下行设计}\label{sec:low_bit_down}
+在海事 DIL 场景中，下行链路的带宽与稳定性直接决定参数分发速率，是造成系统级时延积累的首要瓶颈。受限带宽下，频繁传输全精度模型不仅显著增加通信比特，还会抬升端侧存取与计算负载。为刻画下行设计对下降步的约束，采用期望下降不等式：
+\begin{equation}
+	\label{eq:descent}
+	\mathbb{E}\big[F(\mathbf{w}_{t+1})\big] - F(\mathbf{w}_t)
+	\le
+	- \eta \big\|\nabla F(\mathbf{w}_t)\big\|^{2}
+	+ C_1\,\varepsilon^{2}\!\big(b_{\text{down}}(t)\big)
+	+ C_2\,\zeta^{2}(k),
+\end{equation}
+其中 $\varepsilon(b_{\text{down}}(t))$ 为下行参数量化误差上界，$\zeta(k)$ 表示端侧低位宽执行引入的附加误差，常数 $\eta, C_1, C_2$ 与常见光滑/有界假设相关。因此，下行优化目标是在保证式~\eqref{eq:descent} 成立的前提下，最小化下行传输时延 $T_{\text{down}}(t)$ 与端侧计算时延 $T_{\mathrm{cmp}}(m)$。围绕该目标，本文给出四项下行优化设计。
+
+\textbf{（1）低位宽权重量化：压缩下行比特并约束参数失真。}
+服务器将 $\textbf{w}_t$ 以定点位宽 $b_{\text{down}}(t)$ 封装，下发即用，避免端侧解码回浮点的额外开销。常见两类量化口径为对称~\eqref{eq:sym-q}与仿射~\eqref{eq:aff-q}：
+\begin{equation}\label{eq:sym-q}
+	s = \frac{\max(|\mathbf{w}_t|)}{2^{b_{\text{down}}(t)-1}-1},\quad
+	q = \mathrm{clip}\!\left(
+	\Big\lfloor \tfrac{\mathbf{w}_t}{s}\Big\rceil,\,
+	-2^{b_{\text{down}}(t)-1},\,
+	2^{b_{\text{down}}(t)-1}-1
+	\right),\quad
+	\hat{\mathbf{w}}_t = s \cdot q ,
+\end{equation}
+
+\begin{equation}\label{eq:aff-q}
+	\begin{aligned}
+		s &= \frac{\max(\mathbf{w}_t)-\min(\mathbf{w}_t)}{2^{b_{\text{down}}(t)}-1},\quad
+		z = \Big\lfloor -\tfrac{\min(\mathbf{w}_t)}{s}\Big\rceil, \\
+		q &= \mathrm{clip}\!\left(
+		\Big\lfloor \tfrac{\mathbf{w}_t}{s}\Big\rceil + z,\,
+		0,\,
+		2^{b_{\text{down}}(t)}-1
+		\right),\quad
+		\hat{\mathbf{w}}_t = s \cdot (q - z).
+	\end{aligned}
+\end{equation}
+
+在量化粒度上，可采用“整体量化”和“通道量化”两种方案。整体量化所需的元数据更少、实现简单，而通道量化能够进一步降低失真，但需为每个通道分别存储尺度与零点参数。该步骤直接减少 $\mathrm{bits}_{\text{down}}(t)$ 并缩短 $T_{\text{down}}(t)$。其量化误差上界受位宽 $b_{\text{down}}(t)$ 和量化粒度共同决定，体现在误差项 $\epsilon\!\big(b_{\text{down}}(t)\big)$ 中。
+
+\textbf{（2）低位宽激活量化：降低端侧存取与算子成本，配平执行误差。}
+仅压权重仍会在前向/反向中产生大量激活存取与计算开销。将激活对齐为 $k$ 位可一致化端侧算子，实现存取与计算的同步压缩：
+\begin{equation}
+	\label{eq:act-q}
+	f_{\alpha}^{k}(r)=\mathrm{quantize}_{k}(r),\qquad r\in[0,1],\ \ \text{步长：}1/(2^{k}-1).
+\end{equation}
+
+反向以直通估计器近似梯度，保持可训练性。该步骤主要作用于 $T_{\mathrm{cmp}}(t)$，并将执行近似误差纳入式\eqref{eq:descent} 的 $\zeta(k)$。
+
+
+\textbf{（3）比特卷积核：乘加转位运算，显著收缩计算时延。}
+当权重与激活进一步降至二值集合 $\{-1,1\}$（编码为 $\{0,1\}$），内积可改写为 XNOR–bitcount：
+\begin{equation}
+	\label{eq:xnor}
+	\mathbf{x}^\top \mathbf{y}
+	=
+	2\,\operatorname{bitcount}\!\big(\mathrm{xnor}(b(\mathbf{x}), b(\mathbf{y}))\big)
+	- D_{\text{grad}},
+\end{equation}
+
+其中 $b(\cdot)$ 为二值映射，$\mathrm{xnor}$ 为逐位同或，$d$ 为维度。若硬件并行字宽为 $w$，复杂度由 $\mathcal O(d)$ 近似降至 $\mathcal O(d/w)$。该步骤进一步降低 $T_{\mathrm{cmp}}(t)$，并减少端侧存取能耗，对式\eqref{eq:descent} 的第二项产生实质收缩。
+
+\textbf{（4）低位宽梯度：稳定反向数值并与上行口径对齐。}
+为避免反向噪声在下降步中累积，端侧对本地梯度采用 $k$ 位或二值形式以增强数值稳定。其上行通信策略将在~\ref{sec:Upstream Channel Module Design} 小节展开。定义如下：
+\begin{equation}
+	f_{\gamma}^{k}(\mathbf{g})
+	=
+	2 \max(|\mathbf{g}|)
+	\left[
+	\mathrm{quantize}_{k}\!\Big(
+	\frac{\mathbf{g}}{2\max(|\mathbf{g}|)} + \frac{1}{2}
+	\Big)
+	- \frac{1}{2}
+	\right],
+\end{equation}\label{eq:kbit-grad}
+\begin{equation}
+	\mathbf{g}^{B}
+	= \alpha\,\mathrm{sign}(\mathbf{g}),\qquad
+	\alpha \in \Big\{ \tfrac{\|\mathbf{g}\|_1}{D_{\text{grad}}},\ \|\mathbf{g}\|_\infty \Big\},
+\end{equation}\label{eq:bin-grad}
+该步骤稳定反向近似误差并为上行量化提供统一数值口径，影响式~\eqref{eq:descent} 的 $\zeta(k)$。
+
+综上，$b_{\text{down}}(t)$ 与封装粒度决定式\eqref{eq:descent} 的主项，从而直接缩短 $T_{\text{down}}(t)$ 并控制 $\epsilon(\cdot)$。式\eqref{eq:act-q} 与式\eqref{eq:xnor} 共同决定 $T_{\mathrm{cmp}}(t)$ 与执行误差 $\zeta(k)$。公式\eqref{eq:kbit-grad}，\eqref{eq:bin-grad} 则稳定反向近似误差并对接上行量化口径。由此，本节的可调旋钮为下行位宽 $b_{\text{down}}(t)$、执行位宽 $k$、封装粒度（per\text{-}tensor / per\text{-}channel）与端侧梯度缩放 $\alpha$。
+%这些量在 2.3.3 的资源编排中依据 $\{\omega_{m,t}\}$ 与 $\tau_t$ 自适应设定，并在 2.4 通过灵敏度实验给出工程基线与阈值。
+
+\subsubsection{上行通道优化模块设计}\label{sec:low_bit_up}
+\label{sec:Upstream Channel Module Design}
+在海事 DIL 场景中，上行链路带宽受限、时变性强且能耗约束严格，梯度上传常成为单轮训练时延的主导项之一。根据前述全局目标~\eqref{eq:optimiza_target_fed}，上行方向的关键在于在不破坏期望下降的前提下压缩上传比特与时延，从而加速~\eqref{eq:optimiza_target_fed} 的全局收敛。为量化上行代价与其对下降步的影响。记第 $t$ 轮参与集合为 $\mathcal S_t$，设备 $m$ 的上传量为 $g_{m,t}\in\mathbb R^{D_g}$，上行位宽为 $b_{\text{up}}(t)$，有效吞吐率为 $R_{\text{up}}(t)$，则：
+\begin{equation}
+	\label{eq:up-bits-time}
+	\mathrm{bits}_{\text{up},m}(t)
+	=
+	D_{\text{grad}} \cdot b_{\text{up}}(t)
+	+ \mathrm{meta}(\mathcal{D}_m),\qquad
+	T_{\text{up},m}(t)
+	=
+	\frac{\mathrm{bits}_{\text{up},m}(t)}{R_{\text{up},m}(t)}.
+\end{equation}
+
+上行量化会引入方向与幅度失真，记其尺度为 $\phi\!\big(b_{\text{up}}(t)=1\big)$。在常见的光滑与有界方差假设下，可写期望下降的上界口径为：
+\begin{equation}
+	\label{eq:descent-up}
+	\begin{aligned}
+		\mathbb{E}\big[F(\mathbf{w}_{t+1})\big] - F(\mathbf{w}_t)
+		&\le - \eta_t \big\langle \nabla F(\mathbf{w}_t),\, \mathbb{E}[\bar{\mathbf{G}}_t] \big\rangle
+		+ \frac{L \eta_t^{2}}{2}\,\mathbb{E}\!\left[\|\bar{\mathbf{G}}_t\|^{2}\right] \\[0.5ex]
+		&\le - \eta_t \big\|\nabla F(\mathbf{w}_t)\big\|^{2}
+		+ C_{3}\,\phi^{2}\!\big(b_{\text{up}}(t)\big)
+		+ C_{4}\,\sigma_{t}^{2}.
+	\end{aligned}
+\end{equation}
+
+
+其中 $\bar G_t$ 为服务器端聚合后的量化梯度~\eqref{eq:agg}，$L$ 为光滑常数，$\sigma_t^2$ 包括抽样方差与数据异质性项，$\eta,\eta_t,C_3,C_4$ 为与假设条件相关的常数或调度系数。由~\eqref{eq:up-bits-time}–\eqref{eq:descent-up} 可见，上行设计需在降低 $T_{\text{up}}(t)$ 的同时控制失真项 $\phi(\cdot)$，以维持期望下降为负。为此，我们给出三步递进设计：二值梯度量化、幅度尺度选择，以及服务器聚合与步长控制。
+
+\textbf{(1) 二值梯度规则：} 1 bit 极限压缩 $\mathrm{bits}_{\text{up}}$
+设备 $m$ 在 $w_t$ 处计算本地梯度 $\mathbf{g}_{m,t}$，随后用符号映射与幅度缩放形成二值向量
+\begin{equation}
+	\label{eq:bin-core}
+	\mathbf{G}_{m,t}^{B}=\alpha_{m,t}\,\operatorname{sign}(\mathbf{g}_{m,t}),\qquad \operatorname{sign}(\cdot)\in\{-1,1\}^{D_\text{grad}}.
+\end{equation}
+与全精度上传相比，式\eqref{eq:bin-core} 将每坐标比特降为 $1$，从而按坐标数线性降低 $\mathrm{bits}{\text{up}}(t)$ 与 $T\text{up}(t)$。对应式\eqref{eq:descent-up}，二值化带来的方向偏差体现在 $\phi\big(b_{\text{up}}=1\big)$，需通过尺度与聚合加以约束。
+
+\textbf{(2) 幅度选择：}减小方向偏差并对齐下降项，用于恢复梯度量级的尺度可取
+\begin{equation}
+	\label{eq:alpha-choices}
+	\alpha_{m,t} \in
+	\Big\{
+	\|\mathbf{g}_{m,t}\|_\infty,\ \
+	\|\mathbf{g}_{m,t}\|_1 / D_{\text{grad}}
+	\Big\},
+\end{equation}
+$\|\mathbf{g}\|_\infty$ 给出保守上界，$\|\mathbf{g}\|_1/D_\text{grad}$ 近似匹配平均坐标幅度。二者均可减小
+$\langle\nabla F(w_t),\,\mathbb E[\bar {\mathbf{G}_t}]\rangle$ 的夹角偏差，从而压缩式\eqref{eq:descent-up} 中由量化引入的附加项 $\phi^2(\cdot)$。代价是每设备需上传一个或少量尺度元数据，仅带来常数量级的 $\mathrm{meta}(\mathbf{g}_{m,t})$ 开销。
+
+\textbf{(3) 聚合与步长条件：}
+服务器对上行量化向量做平均聚合并更新：
+\begin{equation}
+	\label{eq:agg}
+	\bar{\mathbf{G}}_t
+	= \frac{1}{|\mathcal{S}_t|}
+	\sum_{m \in \mathcal{S}_t} \widetilde{\mathbf{G}}_{m,t},\qquad
+	\widetilde{\mathbf{G}}_{m,t} \in \big\{\mathbf{G}_{m,t}^{B},\, Q(\mathbf{g}_{m,t}; k)\big\},
+\end{equation}
+\begin{equation}
+	\label{eq:update}
+	\mathbf{w}_{t+1} = \mathbf{w}_t - \eta_t\,\bar{\mathbf{G}}_t.
+\end{equation}
+
+
+在常见的光滑与有界方差假设下，取合适的 $\eta_t$ 可使式\eqref{eq:descent-up} 的右端为负，维持线性或次线性下降。样本平均进一步降低 $\mathbb E\|\bar{ \mathbf{G}_t}\|^2$ 中的噪声项 $\sigma_t^2$。
+
+\subsubsection{基于系统感知的通算资源自适应调度策略}\label{sec:resource_allocation_sys-awa}
+\label{sec:adaptive_orchestration}
+在完成下行模块（~\ref{sec:low_bit_down}）与上行模块（~\ref{sec:low_bit_up}）后，本节从系统层面给出通信、计算与能耗的协同自适应方案。前述两模块分别优化参数广播与梯度上传的量化效率。在海事 DIL 场景中，链路时变与节点异构并存，若缺乏全局协调，局部最优将导致轮次时延累积与能耗不均。为此，构建“观测—控制—执行—回写”的系统级联合调度机制，使位宽、参与集合、本地计算与链路资源形成闭环自适应。
+
+
+\textbf{（1）系统级目标与约束}
+单轮总时延为：
+\begin{equation}
+	T_{\mathrm{round}}(t)=T_{\mathrm{down}}(t)+T_{\mathrm{cmp}}(t)+T_{\mathrm{up}}(t),
+\end{equation}
+期望下降满足下行与上行的不等式约束，~\eqref{eq:descent} 与式~\eqref{eq:descent-up}。据此，系统级优化写作：
+\begin{align}
+	\label{eq:joint-opt}
+	\min_{\mathbf{u}_t}\quad & \mathbb{E}\big[T_{\mathrm{round}}(t)\big] \nonumber \\
+	\text{s.t.}\quad
+	& \mathbb{E}\big[F(\mathbf{w}_{t+1})\big] - F(\mathbf{w}_t) \le 0,\quad
+	\mathbf{u}_t \in \mathcal{U}(t).
+\end{align}
+
+\textbf{（2）设备选择与参与率调度}
+参与集合 $\mathcal S_t$ 同时影响通信负载、能量开销与收敛稳定性。基于可观测量 $\omega_{m,t}$ 定义优先级
+\begin{equation}
+	\label{eq:device-score}
+	\pi_{m,t}=R_{\text{up},m}(t)\cdot \frac{E_m(t)}{E_{\max}}\cdot \frac{S_m}{S},
+\end{equation}
+并取 $\mathcal S_t=\mathrm{TopK}\big(\{\pi_{m,t}\}_m\big)$。该得分兼顾上行质量、剩余能量与样本占比，抑制弱节点拉长 $T_{\text{up}}(t)$ 与放大噪声项 $\sigma_t^2$ 的效应。组合选择可用基于 Hamming 距离的启发式进行快速近似，复杂度约为 $\mathcal O(M\log M)$。
+
+\textbf{（3）位宽与本地计算的自适应}
+位宽与本地步数 $(b_{\text{down}},b_{\text{up}},I_{\text{loc}})$ 决定通信与计算的权衡。根据梯度幅度与链路态势采用分段策略
+\begin{equation}
+	\label{eq:bit-policy}
+	(b_{\text{down}}(t),\,b_{\text{up}}(t))=
+	\begin{cases}
+		(b_{\max},\,b_{\max}), & \|\nabla F(\mathbf{w}_t)\|>\delta_{\text{grad}} \text{ 或训练初期}\\
+		(b_{\min},\,b_{\min}), & \mathrm{RTT}(t)>\delta_{\text{rtt}} \text{ 或链路不稳}\\
+		\text{中间值}, & \text{其余情况}
+	\end{cases}
+\end{equation}
+同时在链路稳定且能耗裕度允许时提高 $I^{\text{local}}_t$ 以降低通信频次，在链路受限时降低 $I^{\text{local}}_t$ 并提升 $b_{\text{down}}$ 稳定对齐。该策略与式~\eqref{eq:descent}、\eqref{eq:descent-up} 的误差项配合，确保期望下降不被量化噪声放大。
+
+\begin{algorithm}[!hbtp]
+	\caption{系统感知的联邦低位宽自适应量化算法（SA\mbox{-}FLQ）}
+	\label{alg:saflq}
+	\SetAlgoLined
+	\KwIn{初始模型 $\mathbf{w}_0$；最大轮数 $K$；节点集 $\mathcal{M}$；约束 $\tau_{\max}, E_{\min}$}
+	\KwOut{训练好的全局模型 $\mathbf{w}_K$}
+	
+	\For{$t = 1$ \KwTo $K$}{
+		\textbf{Phase 1: 感知与决策 (Sense \& Decide)}\\
+		\ForEach{$m \in \mathcal{M}$ (并行)}{
+			网络层采集状态 $\boldsymbol{\omega}_{m,t} = [R_{\text{up}}, R_{\text{down}}, \mathrm{RTT}, E, f]$ 上报至编排层；
+		}
+		编排层计算节点得分 $\text{Score}_{m,t}$，选择参与集合 $\mathcal{S}_t$；\\
+		依据式~\eqref{eq:bit-policy} 确定当前位宽 $(b_{\text{down}}, b_{\text{up}})$；\\
+		生成控制向量 $\mathbf{u}_t = (\mathcal{S}_t, b_{\text{down}}, b_{\text{up}}, I_{\text{loc},t})$ 并下发；\\
+		
+		\textbf{Phase 2: 下行广播 (Broadcast)}\\
+		$\mathbf{w}_t$ 量化为 $\hat{\mathbf{w}}_t = Q(\mathbf{w}_t; b_{\text{down}})$；\\
+		通过下行链路广播给集合 $\mathcal{S}_t$ 中的所有节点；\\
+		
+		\textbf{Phase 3: 协同执行 (Collaborative Execution)}\\
+		\ForEach{$m \in \mathcal{S}_t$ (并行)}{
+			计算层加载本地数据 $D_m$ 与模型 $\hat{\mathbf{w}}_t$；\\
+			执行 $I_{\text{loc},t}$ 轮本地 SGD 训练，计算梯度 $\mathbf{g}_{m,t}$；\\
+			网络层执行自适应量化 $\hat{\mathbf{g}}_{m,t} = Q(\mathbf{g}_{m,t}; b_{\text{up}})$；\\
+			通过上行 DIL 链路回传量化梯度；\\
+		}
+		
+		\textbf{Phase 4: 全局聚合 (Aggregation)}\\
+		服务器接收并反量化梯度，执行加权聚合：
+		$\bar{\mathbf{g}}_t = \frac{1}{\sum S_m} \sum_{m \in \mathcal{S}_t} S_m \hat{\mathbf{g}}_{m,t}$；\\
+		更新全局模型：$\mathbf{w}_{t+1} = \mathbf{w}_t - \eta_t \bar{\mathbf{g}}_t$；\\
+		\textbf{回写：} 记录本轮时延 $T_{\text{round}}$ 与能耗，更新历史统计信息。
+	}
+\end{algorithm}
+
+如算法~\ref{alg:saflq} 所示，SA\mbox{-}FLQ 联合调度算法在每轮中动态执行设备选择、位宽自适应、计算步数与链路资源分配。系统通过“观测—控制—执行—回写”闭环，使通信比特、计算负载与能耗在式~\eqref{eq:joint-opt} 约束下保持全局协调，实现收敛稳定与资源最优的统一。实验部分将进一步验证该算法在不同链路与能量条件下的时延—精度折中效果。
+
+
+\subsection{性能仿真与系统验证}
+\label{sec:exp_objective}
+本节旨在验证 SA\mbox{-}FLQ 算法在受限带宽与异构节点环境中的性能表现，并评估其在基于 K8s 与 KubeEdge 的分布式边缘集群中的系统级可部署性。前述第~\ref{sec:modeling_block_ch2} 节从理论建模与算法设计的角度阐述了 SA\mbox{-}FLQ 如何通过下行参数量化、上行梯度压缩与端侧低位宽计算来平衡通信时延与模型收敛性。本节从算法性能、梯度机理及系统实现三个层面展开实验分析。
+
+\subsubsection{实验设置}
+
+实验在受控仿真环境中评估 SA\mbox{-}FLQ 的收敛稳定性与量化性能，通过与全精度联邦学习及典型量化算法的对比，验证在不同位宽策略下的收敛速度、通信压缩率和梯度误差特性。随后，在基于 Kubernetes 与 KubeEdge 的多节点边缘集群上完成系统级部署验证，测试 SA\mbox{-}FLQ 在真实无线环境中的端到端运行行为，考察通信与计算的协同调度效果。最后，通过基于 YOLO 的联邦油污检测任务进行任务级实测，验证该算法在实际海事业务场景中的精度保持与通信效率。整体实验流程遵循“仿真验证—系统部署—任务实测”的递进逻辑，以闭环方式论证 SA\mbox{-}FLQ 的理论模型与系统架构一致性。
+
+在仿真实验中，构建一个由聚合端服务器与若干逻辑客户端组成的联邦拓扑。为全面评估算法在不同特征复杂度下的鲁棒性，选取 MNIST 手写数字和 Fashion\mbox{-}MNIST 时尚物品两个标准基准数据集。各客户端在受控 Non\mbox{-}IID 划分下持有数据子集，划分方式采用基于 Dirichlet 分布的配额分配，参数设置为 $\alpha=0.1$，用于模拟数据分布显著不均衡的场景。模型方面，实验统一部署一个包含双卷积块与双全连接结构的四层卷积神经网络，类 VGG 结构，以在控制网络结构变量的前提下专注评估量化策略本身的影响。对比基线包括全精度 FedAvg、八位随机舍入量化（LAQ\mbox{-}8bit）以及固定一比特的二值量化方案。SA\mbox{-}FLQ 在下行采用统一低位宽参数广播，在上行采用自适应位宽梯度压缩，并在端侧执行低位宽前向与反向计算。
+
+系统级部署实验在一套异构边缘集群上进行。集群包含一台 x86 服务器节点和六台 NVIDIA Jetson Nano 边缘节点，所有节点运行 Ubuntu 操作系统与 Docker 容器环境。服务器侧部署 Kubernetes 控制平面与 KubeEdge，集成联邦协调器、模型聚合器、量化器以及 SA\mbox{-}FLQ 控制向量生成模块，负责参数广播、参与节点调度、位宽决策和全局聚合。六台 Jetson Nano 作为边缘节点运行 EdgeCore 与轻量化容器化训练环境，内置低位宽卷积算子与定点梯度计算模块，并通过设备孪生与遥测组件持续采集链路速率、往返时延、节点负载和能量预算等可观测量。节点间通过无线网络互联，链路带宽在 $2\sim10$\,Mbps 范围内随机波动，并叠加 $0\%\sim20\%$ 的随机丢包概率，用以近似海上多跳 DIL 场景中的带宽受限和链路间歇特性。
+
+任务级实测选取\textbf{海面溢油检测}作为目标业务，旨在解决 SAR 遥感图像回传带宽不足的难题。
+\textbf{1) 数据集：}实验采用 \textbf{Maritime Oil Spill Detection Benchmark}~\upcite{oil_spill_vision_dataset} 作为视觉感知任务的评估基准。该数据集汇集了由无人机（UAV）低空航拍与卫星遥感采集的多源海面图像，构建了一个包含不同光照条件、海况等级与成像视角的异构样本库。为适配 YOLO 系列模型的全监督训练需求，所有样本均已完成面向对象检测的\textbf{实例级标注（Instance-level Annotation）}，提供了精确的溢油区域边界框（Bounding Box）。针对海事通信带宽受限的特点，我们在边缘端对原始高分辨率图像进行了自适应切片与降采样预处理，生成标准输入流以模拟船载相机的实时采集数据。
+\textbf{2) 模型与配置：} 选取基于 YOLOv8 的轻量化检测网络，并针对 SAR 图像特征微调为 YOLO\mbox{-}oil。数据按照海域类型进行 Non\mbox{-}IID 划分并分配给六个 Edge 节点，仅在本地参与训练以满足\textbf{数据主权与隐私约束}。
+训练过程采用轮式联邦调度算法~\ref{alg:saflq}，每一轮包含参数广播、本地低位宽训练、量化梯度上传与服务器聚合四个阶段。全精度 FedAvg 与集中式 YOLO\mbox{-}oil 训练作为对照，用于刻画在相同配置下的精度上界和通信开销基线。
+\textbf{3)任务挑战与特性：}本实验聚焦于\textbf{“复杂动态海面下的溢油目标检测”}，其核心难点在于克服海面特有的视觉干扰。正如文献~\cite{Kubat1998OilSpill}所指出的，与陆地静态背景不同，动态海面存在的强烈\textbf{日光耀斑}以及海浪破碎产生的白色泡沫，极易在纹理与灰度上模仿真实油膜，形成所谓的\textbf{“类油膜伪影”}。此外，溢油区域形态呈现显著的\textbf{多尺度特征}，从连片的大面积油带到零散的微小油斑并存，这对边缘检测模型在低算力、低带宽约束下的特征提取与多尺度融合能力提出了严峻考验。
+
+
+%任务级实测采用海面油污检测作为目标业务。在模型方面，选取基于 YOLOv8 的轻量化检测网络作为基础结构，并将针对油污目标重新训练后的模型记为 YOLO\mbox{-}oil。数据集由公开遥感溢油图像与自采海面照片构成，按照海域类型、海况条件和视角差异进行 Non\mbox{-}IID 划分，分别分配给六个 Edge 节点，仅在本地参与训练以满足联邦学习的数据主权和隐私约束。训练过程采用轮式联邦调度算法~\ref{alg:saflq}，每一轮包含参数广播、本地低位宽训练、量化梯度上传与服务器聚合四个阶段。全精度 FedAvg 与集中式 YOLO\mbox{-}oil 训练作为对照，用于刻画在相同数据与任务配置下的精度上界和通信开销基线。
+
+为保持与第~\ref{sec:modeling} 节系统建模的一致性，实验统一采用以下指标集合：
+\begin{equation}
+	\big\{\mathrm{Acc},\ \mathrm{mAP},\ T_{\mathrm{round}},\ \mathrm{bits}_{\text{down}},\ \mathrm{bits}_{\text{up}},\ \mathrm{Compression\ Ratio},\ \mathrm{RMSE}\big\},
+\end{equation}
+其中，$T_{\mathrm{round}}$ 为单轮总时延，$\mathrm{bits}_{\text{up/down}}$ 为通信比特量，$\mathrm{RMSE}$ 为量化误差，$\mathrm{mAP}$ 为检测精度。
+
+\subsubsection{收敛性能对比}
+%图~\ref{fig:convergence} 展示了不同量化策略在 Fashion-MNIST 数据集（Non-IID, $\alpha=0.1$）下的交叉熵损失收敛曲线。实验共进行 800 轮通信。
+
+实验在 Fashion-MNIST 数据集，Non\mbox{-}IID 划分下对 SA\mbox{-}FLQ 的收敛性能进行系统验证，并与两类典型联邦量化基线进行对比。全局模型为四层卷积神经网络，包含两个卷积块和两个全连接层，所有方法在相同的学习率、批大小与本地 epoch 数配置下运行，共进行 $800$ 轮通信。
+
+我们设置了几种常用的对比方法：
+\begin{itemize}
+	\item \textbf{QGD}（Quantized Gradient Descent），在每轮通信中对上行梯度采用固定 $k$ 比特的均匀标量量化，量化步长与动态范围在训练开始时确定并保持不变，代表典型的“固定精度、无系统感知”的量化梯度联邦训练方案。
+	\item \textbf{LAQ}（Low-precision Adaptive Quantization），对梯度采用 $8$ 比特均匀量化并引入随机舍入以保持无偏性，量化范围按批次统计更新，但位宽与通信策略与链路状态无关，代表常见的“局部自适应、全局无感知”范式。
+	\item \textbf{SA\mbox{-}FLQ},本文提出的方法，在下行方向采用统一低位宽参数广播，在上行方向根据当前可观测链路与节点状态调节位宽，并在端侧以低位宽卷积和梯度计算替代全精度算子，实现“观测–控制–执行–回写”闭环下的系统感知量化训练。
+\end{itemize}
+
+\begin{figure}[!hbtp]
+	\centering
+	\includegraphics[width=0.7\linewidth]{figures/fig_kew_flq/Fig2_fmnist.png}
+	% 图 2.2
+	\bicaption[SA-FLQ 与基线方法的收敛性能对比]%
+	{在 Non\mbox{-}IID 数据划分方式，SA\mbox{-}FLQ 与 QGD、LAQ 等基线算法在 800 轮通信中的交叉熵损失收敛曲线对比。可以看到，在相同通信轮次下，SA\mbox{-}FLQ 始终保持更低的损失值和更平滑的收敛轨迹。}%
+	{Convergence performance comparison of SA\mbox{-}FLQ against QGD and LAQ baselines over 800 communication rounds in Non\mbox{-}IID setting. SA\mbox{-}FLQ consistently achieves lower cross-entropy loss and smoother convergence trajectories under the same number of communication rounds.}
+	\label{fig:convergence}
+\end{figure}
+
+图~\ref{fig:convergence} 给出了三种方法在相同 Non\mbox{-}IID 配置下的交叉熵损失收敛曲线。可以看到，所有方法在初始阶段均经历较快的损失下降，但 QGD 曲线在约 $100$ 轮后出现明显的震荡与高平台，后续收敛速度显著减缓，说明固定量化步长难以同时兼顾早期大梯度与后期小梯度，对后期细粒度优化形成约束。LAQ 受益于随机舍入与动态范围更新，在整个训练过程中较 QGD 显著降低了损失水平，收敛曲线也更为平滑，但在中后期仍存在可见的震荡与残余偏差。与两类基线相比，\textbf{SA\mbox{-}FLQ} 在几乎所有轮次上均保持最低的损失值，且曲线平滑性最好，没有出现明显抖动。这表明，系统感知的下行位宽基线与上行自适应压缩策略有效地控制了量化误差项对下降方向的一致性破坏，使得在受限带宽条件下仍能保持接近全精度的优化路径。
+
+\begin{table}[!htbp]
+	\centering
+	\bicaption{SA\mbox{-}FLQ 算法通信资源对比}{Comparison of communication resources in the SA-FLQ algorithm.}
+	\label{tab:resource_comparison}
+	\begin{tabular}{c|c|c|c|c}
+		\hline
+		方法 & 迭代次数 & 广播开销(bits) & 上传开销(bits) & 准确率(\%) \\
+		\hline
+		LAQ (随机舍入) & 1000 & $5.9 \times 10^{10}$   & $1.4 \times 10^{10}$   & 86.21 \\
+		LAQ (随机舍入) & 1500 & $8.62 \times 10^{10}$  & $2.24 \times 10^{10}$  & 87.56 \\
+		SA\mbox{-}FLQ（二值） & 1000 & $6.03 \times 10^{10}$  & $9.54 \times 10^{9}$   & 89.66 \\
+		SA\mbox{-}FLQ（二值） & 1500 & $8.76 \times 10^{10}$  & $1.409 \times 10^{10}$ & 90.69 \\
+		SA\mbox{-}FLQ（低位宽） & 1000 & $1.45 \times 10^{10}$  & $1.42 \times 10^{10}$  & 90.38 \\
+		SA\mbox{-}FLQ（低位宽） & 3000 & $4.40 \times 10^{10}$  & $4.40 \times 10^{10}$  & 93.73 \\
+		\hline
+	\end{tabular}
+\end{table}
+
+表~\ref{tab:resource_comparison} 进一步给出了典型配置下各方法的广播比特量、上传比特量与最终分类精度。可以看到，在相同迭代次数下，LAQ 相比全精度显著降低了上传比特量，但广播端仍维持较高位宽，整体通信负载仍然较大。SA\mbox{-}FLQ 在二值化配置下，将上行比特量压缩到 LAQ 的一个数量级以内，同时保持更高的最终精度，说明在极端压缩场景中系统感知位宽调度仍能维持有效的梯度方向。在低位宽配置下，SA\mbox{-}FLQ 通过在训练早期使用相对较高位宽以保证充分探索，在中后期逐步下调位宽以削减通信开销，最终在 $3000$ 轮迭代时取得约 $93.7\%$ 的最高准确率，在通信比特量与精度表现上均优于 LAQ。结合图~\ref{fig:convergence} 的收敛轨迹可以看出，SA\mbox{-}FLQ 并非简单依靠激进压缩获得比特优势，而是在显式约束式~\eqref{eq:descent} 与式~\eqref{eq:descent-up} 的前提下，通过系统级联合调度使量化误差项保持在可控范围，兼顾了通信效率、收敛速度与模型精度。
+
+综合图~\ref{fig:convergence} 与表~\ref{tab:resource_comparison}，我们可以给出结论：在受控 Non\mbox{-}IID 环境和相同算法超参数下，SA\mbox{-}FLQ 相比固定精度的 QGD 与仅在局部更新层面进行自适应的 LAQ，能够在明显降低上下行通信比特量的同时，实现更快且更平滑的收敛过程，验证了“系统感知低位宽联邦学习”在算法层面的有效性。后续的系统级部署实验将进一步检验这种趋势在真实 K8S 集群与 YOLO-oil 任务上的一致性。
+
+\begin{figure}[!tbhp]
+	\centering
+	\includegraphics[width=0.8\linewidth]{figures/fig_kew_flq/gradient_quantification.jpg}
+	\bicaption[SA-FLQ 通信过程中的梯度二值化量化可视化]
+	{SA-FLQ 通信过程中的梯度二值化量化可视化。蓝色离散点展示了在不同通信轮次下，连续梯度值被强制量化为二值状态 $\{0, 1\}$ 的分布情况，红线 ($y=0.5$) 表示量化判决阈值，直观反映了通信开销被压缩至 1 bit 的过程。}
+	{Visualization of binary gradient quantization during the SA-FLQ communication process. The blue dots show how continuous gradient values are forced into binary states $\{0, 1\}$ across communication rounds, with the red line ($y=0.5$) indicating the quantization decision threshold, intuitively reflecting the process of compressing communication overhead to the 1-bit limit.}
+	\label{fig:gradient_quant}
+\end{figure}
+
+\subsubsection{梯度量化结果分析}
+%为进一步解释 SA\mbox{-}FLQ 在强压缩条件下仍能保持稳定收敛的原因，本小节从量化梯度的动态行为出发，分析量化误差与下降方向的一致性。图~\ref{fig:gradient_quant} 展示了在完整训练周期内，多轮通信下梯度二值化的可视化结果，将连续梯度被压缩到 $\{0,1\}$ 二值集合的过程直观呈现出来。
+
+为进一步解释 SA\mbox{-}FLQ 的微观生效机理，图~\ref{fig:gradient_quant} 可视化了训练全周期内的梯度二值化分布。可以看到，训练早期梯度在 $\{0, 1\}$ 间频繁跳变，反映了探索阶段的剧烈更新；随着训练推进，二值化轨迹呈现出稳定的块状结构。这说明即便在 1-bit 极限压缩下，SA\mbox{-}FLQ 仍能提取出一致的下降方向。
+
+
+从图~\ref{fig:gradient_quant} 可以看到，训练早期的梯度二值化结果在 $0$ 与 $1$ 之间频繁跳变，对应了模型参数在初始阶段需要较大的更新步长以及较强的探索性。随着训练推进，二值化轨迹逐渐呈现出更加规律的块状结构，相邻通信轮次中的模式趋于稳定。这说明在低位宽约束下，网络仍能够从量化后的梯度中提取出一致的下降方向，量化噪声在时间上被逐步平均，从而避免破坏整体的收敛趋势。
+
+为了对梯度保真度进行定量刻画，我们进一步计算了量化梯度与全精度梯度之间的均方根误差（RMSE），并在不同量化位宽 $k$ 下进行对比。图~\ref{fig:k_parameter} 给出了 $k=4$ 与 $k=8$ 两种典型设置下的近似性能。可以看到，当 $k=4$ 时，量化近似值在真值曲线附近仍存在可见抖动，RMSE 约为 $1.38\times10^{-2}$，说明在强压缩条件下虽然整体方向保持一致，但局部仍存在一定幅度偏差。当位宽提升到 $k=8$ 时，蓝色量化点与红色真值曲线几乎完全重合，RMSE 降至 $6\times10^{-4}$ 量级，表明在该位宽下已经可以实现近乎无损的数值保真度，同时仍显著低于全精度带来的通信开销。
+
+\begin{figure}[!thbp]
+	\centering
+	\begin{minipage}[t]{0.48\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/fig_kew_flq/Fig4_k4_fmnist.png}
+		\vspace{2pt}\small (a) $k=4$ 时的梯度近似误差
+	\end{minipage}\hfill
+	\begin{minipage}[t]{0.48\linewidth}
+		\centering
+		\includegraphics[width=\linewidth]{figures/fig_kew_flq/Fig4_k8_fmnist.png}
+		\vspace{2pt}\small (b) $k=8$ 时的梯度近似误差
+	\end{minipage}
+	\bicaption[SA\mbox{-}FLQ 算法在不同量化位宽下的梯度近似性能对比]
+	{不同量化位宽下的梯度近似性能对比。(a) 在 $k=4$ 时，量化近似值（蓝点）在真值（红线）附近存在可见抖动，RMSE 为 0.0138。(b) 当位宽增加至 $k=8$ 时，量化值与真值曲线高度重合，RMSE 降至 0.0006，表明该位宽下已能实现近乎无损的数值保真度。}
+	{Comparison of gradient approximation performance under different quantization bitwidths. (a) At $k=4$, the quantized values (blue dots) show visible noise around the true values (red line) with an RMSE of 0.0138. (b) At $k=8$, the quantized values tightly align with the true curve, reducing the RMSE to 0.0006 and indicating near-lossless numerical fidelity at this bitwidth.}
+	\label{fig:k_parameter}
+\end{figure}
+
+综合二值化轨迹与 RMSE 曲线可以看出，SA\mbox{-}FLQ 通过统一的量化体系，将误差项 $\varepsilon(b)$ 与 $\phi(b)$ 约束在可控范围，使量化梯度在统计意义上保持与全精度梯度一致的下降方向，从而满足式~\eqref{eq:descent} 与式~\eqref{eq:descent-up} 的下降条件。这一结论为前一小节中观测到的“在显著压缩通信比特量的同时保持稳定收敛”提供了机制层面的解释，也为后续在真实 K8s\,+\,KubeEdge 集群上的系统级实验奠定了理论基础。
+
+\subsubsection{系统级部署与端到端验证}
+为验证 SA\mbox{-}FLQ 在真实边缘环境中的可部署性，本小节构建了一个基于 Kubernetes (K8s) 与 KubeEdge 的云—边—端协同训练系统。图~\ref{fig:system_architecture} 展示了系统的总体部署拓扑，其中绿色方框标识了本研究针对海事 DIL 环境开发的 SA-FLQ 增强模块，灰色方框为 KubeEdge 基础组件。
+
+\begin{figure}[!hbtp]
+	\centering
+	\includegraphics[width=0.9\linewidth]{figures/fig_kew_flq/system_architecture.png}
+	\bicaption[SA-FLQ系统部署组件结构说明]{SA\mbox{-}FLQ 在 K8s\,+\,KubeEdge 边缘集群上的系统级部署结构。}{System-level deployment architecture of SA-FLQ on a K8s and KubeEdge based edge cluster.}
+	\label{fig:system_architecture}
+\end{figure}
+
+在服务器节点，系统运行 K8s 控制平面与 KubeEdge CloudCore。除了配置原生的边缘控制器与设备控制器以负责基础生命周期管理外，本研究扩展了 \textbf{模型分发器}作为协同核心。该组件集成了全局聚合与调度逻辑，负责接收边缘侧上报的状态 $\boldsymbol{\omega}$，解算控制向量 $\mathbf{u}_t$，并通过云端枢纽向边缘侧广播量化后的全局模型与控制策略。
+
+边缘节点由 6 台 NVIDIA Jetson Nano 组成，作为 KEW 架构的物理载体，其内部组件按KEW逻辑层级分布。网络层部署了 \textbf{链路监测}与边缘枢纽模块，实时探针北向 DIL 链路以采集带宽与丢包率，并拦截上行梯度数据流进行自适应量化。编排层运行边缘核心，包含设备状态孪生器与设备管理器，利用设备孪生机制同步云端下发的 $\mathbf{u}_t$ 策略，并监控本地计算资源以实现断连自治。顶层计算层则运行 \textbf{SA-FLQ 训练器}，该容器通过挂载卷直接读取本地数据，在资源约束下执行低位宽训练任务。并通过云端枢纽和边缘枢纽向上同步梯度数据，管理异构传感器和边缘设备。
+
+
+
+整个系统保持严格的“观测—控制—执行—回写”闭环：链路监测模块持续上报链路状态 $\boldsymbol{\omega}$ 至边缘枢纽，模型分发器据此生成策略并通过云端枢纽下发，最终由 SA-FLQ 训练器执行训练并回传量化梯度。该机制在系统层面严格遵守了第 \ref{sec:modeling} 节构建的优化模型。基于上述平台，实机实验以\textbf{联邦油污检测（YOLO-oil）}作为端到端任务展开。通信环境采用无线网络，链路带宽在 $2\sim10$ Mbps 间动态波动，并叠加 $0\%\sim20\%$ 的随机丢包，以模拟典型海上 DIL 条件。
+
+%-----------------
+%
+%为验证 SA\mbox{-}FLQ（System-Aware Federated Low-bitwidth Quantization）在真实边缘环境中的可部署性，本节构建了一个基于 Kubernetes（K8s）与 KubeEdge 的云–边–端协同训练系统，并在其中运行完整的联邦油污检测任务。图~\cite{fig:system_architecture} 展示了系统的总体部署结构。服务器节点运行 K8s 控制面与 KubeEdge CloudCore，包括控制器、设备监控模块、模型分发器、FLQ 量化器以及全局聚合器等组件，负责参数广播、梯度聚合与控制量生成。服务器端的 SA\mbox{-}FLQ 编排器根据链路速率、RTT、设备计算负载与能耗等可观测量生成下一轮的控制向量 $u_t$，包含下行位宽、上行位宽、本地训练步数以及参与设备集合等，随后通过 CloudHub 下发至各 Edge 节点。边缘节点运行 EdgeCore，并包含 EdgeHub、设备孪生（Device Twin）、设备管理器、链路与算力监测模块、SA\mbox{-}FLQ 训练器和本地数据存储等组件，负责执行低位宽前向与反向训练，实时监测链路与设备负载，并将量化后的梯度上传至 Server 端。Device 侧由多台 Jetson Nano 组成，作为每个 Edge 的终端执行模块，承担卷积计算、定点量化与本地数据处理任务，构成 SA\mbox{-}FLQ 端侧执行模型的物理载体。
+%
+%整个系统保持严格的“观测–控制–执行–回写”闭环：EdgeHub 与设备孪生持续上报链路带宽、RTT、GPU/CPU 占用、电池状态等可观测量。Server 根据状态生成控制向量并通过 CloudHub 下发。各设备节点按控制量执行低位宽训练并量化梯度。Server 聚合后更新模型并将回合统计量回写，用作下一轮调度输入。该机制在系统层面遵守了优化模型，使理论建模、算法流程与实际系统行为对齐。
+%
+%基于上述平台，实机实验以联邦油污检测（YOLO-oil）作为端到端任务展开。油污图像数据依据不同海域、不同天气和不同视角进行 Non-IID 划分并分发至 6 个 Jetson Nano 设备节点，使数据分布与海事场景保持一致。通信环境采用无线 Mesh 网络，链路带宽在 $2–10$ Mbps 间动态波动，并叠加 $0–20\%$ 的随机丢包，以模拟典型海上 DIL 条件。训练模型采用 YOLOv8-small 的容器化版本，总计执行约 $200$ 轮联邦迭代。下行参数采用 8-bit 广播，上行梯度采用 SA\mbox{-}FLQ 的自适应位宽策略在 1–8 bit 间动态切换，以验证系统级通信压缩、时延控制与模型精度之间的折中行为。
+
+\begin{figure}[!hbtp]
+	\centering
+	\includegraphics[width=0.7\linewidth]{figures/fig_kew_flq/map_convergence_cn.png}
+	\bicaption[实验集群中不同方法在海面油污检测任务上的收敛曲线]%
+	{实验集群中不同方法在油污检测任务上的收敛曲线。横轴为通信轮次，纵轴为验证集 $\mathrm{mAP}_{50}$。\textbf{SA\mbox{-}FLQ} 在受限带宽下表现出最快的上升速率，并最终逼近集中式训练（虚线）的精度上界，显著优于全精度 FedAvg。}%
+	{Convergence curves of different methods on the oil-spill detection task in the cluster. The x-axis represents communication rounds, and the y-axis represents validation $\mathrm{mAP}_{50}$. \textbf{SA\mbox{-}FLQ} demonstrates the fastest ascent rate under restricted bandwidth, approaching the upper bound of centralized training, significantly outperforming full-precision FedAvg.}
+	\label{fig:system_convergence}
+\end{figure}
+
+\subsubsection{SA-FLQ算法在油污检测任务中的实验}
+图~\ref{fig:system_convergence} 展示了 SA\mbox{-}FLQ、标准全精度 FedAvg 以及集中式训练三种方法在联邦油污检测任务中的收敛轨迹。横轴为通信轮次，纵轴为验证集的平均精度均值。集中式训练作为上界基准，在初期即可快速进入稳定区间，最终收敛精度最高。全精度 FedAvg 在系统级环境中的表现相对平稳，但在受限带宽与链路时延波动的条件下，其整体收敛速度明显慢于集中式训练，尤其在前 50 轮中呈现较长的缓慢爬升阶段。
+
+\begin{table}[!hbtp]
+	\centering
+	\bicaption{集群系统级实验结果。}{Overview of system-level experimental results on cluster. }
+	\begin{tabular}{c|c|c|c}
+		\hline
+		方法 & mAP50(\%) & 上行通信开销(MB) & 平均单轮时延(ms) \\
+		\hline
+		集中式训练 & $80\%$     & N/A           & 
+		/A \\
+		FedAvg & $70\%$     & 267.75 & 145 \\
+		SA\mbox{-}FLQ       & $78\%$  & 66.94 & 20 \\
+		\hline
+	\end{tabular}
+\end{table}\label{tab:system_comm}
+
+相比之下，SA\mbox{-}FLQ 的收敛速度显著提升，在训练早期即表现出与集中式训练接近的上升斜率。随着通信轮次增加，SA\mbox{-}FLQ 在中后期持续逼近集中式精度，并在多数轮次上保持优于全精度 FedAvg 的稳定趋势。这一优势来自于 SA\mbox{-}FLQ 在真实 K8s + KubeEdge 边缘环境下对通信、计算与量化的统一优化：其动态位宽决策减少了上行通信负载，使节点能够更频繁地参与全局更新，同时低位宽的前向与反向计算进一步减轻了 Jetson 侧的算力瓶颈，从而缩短了单轮训练时间。结合系统记录的链路速率、回合时延以及上下行比特量，可以观察到 SA\mbox{-}FLQ 在远低于全精度 FedAvg 的通信代价下实现了接近集中式的收敛性能，验证了第二章中“系统感知量化—可观测量驱动—全局一致性更新”的整体设计逻辑。
+
+整体来看，系统级实验充分说明 SA\mbox{-}FLQ 在真实无线链路和资源受限的边缘环境中保持了与算法级仿真一致的收敛趋势，同时显著降低通信开销并提升全局训练效率。
+
+为进一步量化系统级性能，实验统计了模型最终精度、总通信开销以及单轮平均时延，结果如表~\ref{tab:system_comm} 所示。集中式训练由于不涉及分布式传输，不统计通信指标；全精度 FedAvg 在六个 Jetson Nano 节点的训练过程中累积约 267.75 MB 的上行通信量，单轮平均时延为 145 ms。SA\mbox{-}FLQ 借助下行统一量化广播与上行自适应梯度压缩，将通信开销降低至 66.94 MB，约为 FedAvg 的四分之一，同时将单轮平均时延降低到 20 ms，显著提升了训练实时性与长期可扩展性。更重要的是，在较低通信成本下 SA\mbox{-}FLQ 的最终模型精度接近集中式基准，高于全精度 FedAvg，验证了其在真实边缘环境中的优越性。
+
+在任务级表现方面，图~\ref{fig:oil_detection_visual} 给出了来自不同海域场景的若干可视化检测结果，包括近海浅色油膜、风浪扰动背景下的条带状油污、混浊海况中的小面积油斑以及高反射背景下的薄层油光。可以看到，经 SA\mbox{-}FLQ 训练后的 YOLO-oil 模型能够在多样场景下稳定检测油污区域，各检测框的位置与面积均与人工标注高度一致。此外，在部分弱对比度与高噪声场景（如逆光反射或低纹理背景）中仍能保持较高的置信度，说明 SA\mbox{-}FLQ 在分布式训练条件下并未损害模型的任务泛化能力。结合精度曲线与系统资源开销的综合分析，本节结果表明 SA\mbox{-}FLQ 在实际部署环境中能够实现通信效率、训练稳定性与检测精度的三重平衡。
+
+\begin{figure}[!hbtp]
+	\centering
+	\includegraphics[width=0.6\linewidth]{figures/fig_kew_flq/oil_detection_vis.png}
+	\bicaption[海面油污检测任务的可视化检测结果]%
+	{海面油污检测任务的可视化检测结果示例。展示了模型在不同海况（如风浪扰动、弱光照、强反光）下的联邦模型监测可视化效果。蓝色框为检测出的油污区域，标签数值为置信度。结果表明 SA\mbox{-}FLQ 训练的模型具有良好的泛化性与鲁棒性。}%
+	{Representative qualitative results of the federated oil-spill detection task. The figure displays detection performance under various sea conditions (e.g., wave disturbance, low light, strong reflection). Blue boxes indicate detected oil spill areas, with label values representing confidence scores. Results demonstrate the good generalization and robustness of the model trained by SA\mbox{-}FLQ.}
+	\label{fig:oil_detection_visual}
+\end{figure}
+
+综上，算法级仿真实验表明 SA\mbox{-}FLQ 在受限带宽与 Non\mbox{-}IID 条件下能够在保持收敛稳定性的同时显著降低通信开销，系统级部署实验进一步证明该框架可以在基于 K8s 与 KubeEdge 的多节点边缘集群中稳定运行，在真实联邦油污检测任务中实现接近集中式训练的精度并明显压缩上下行比特量与单轮时延，为后续扩展到更大规模海事边缘网络提供了工程依据。
+
+\subsection{本章小结}
+本章针对海事弱连通（DIL）环境下分布式模型训练面临的“通信瓶颈”与“异构约束”双重难题，提出了一种通算融合的系统感知协同学习解决方案。主要研究工作与结论总结如下：
+
+首先，在架构层面，设计了面向海事边缘场景的系统感知协同架构（KEW）。针对原生 KubeEdge 平台缺乏底层信道感知能力的局限，KEW 在边缘节点内部构建了“网络—编排—计算”三层逻辑闭环。通过定义标准化的系统感知接口，打通了物理层链路状态与应用层训练策略之间的信息壁垒，确立了“北向感知、南向执行、断连自治”的边缘智能工程范式。
+
+其次，在算法层面，本章提出了\textbf{通信感知的联邦低位宽量化算法（SA-FLQ）}。该算法揭示了在 DIL 约束下“以算换传”的协同机理，通过下行一致性广播与上行自适应梯度压缩，动态平衡了模型收敛精度与通信开销。理论分析与仿真结果表明，SA\mbox{-}FLQ 能够有效抑制量化噪声对全局优化方向的偏离，在受限带宽下实现快速收敛。
+
+最后，在验证层面，构建了基于 K8s 的异构边缘集群，并完成了 \textbf{YOLO-oil 联邦油污检测}的端到端实机测试。实验结果证实，在模拟海事 DIL 网络条件下，SA\mbox{-}FLQ 能够在保持检测精度的同时，将通信开销降低约 75\%，并将单轮时延压缩至毫秒级，验证了所提架构与算法在真实系统中的鲁棒性与有效性。
+
+本章研究聚焦于海事边缘场景中“模型如何高效学习”的问题，提出了相关解决方案和算法，并基于集群验证。然而，随着海事任务从单一的模型训练扩展到更广泛的计算任务卸载，如何应对\textbf{海面网络拓扑的强动态变化}与\textbf{节点资源的深度异构性}，实现通算资源的时空联合编排，将是我们下一步重点研究问题。
+

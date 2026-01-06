@@ -1,0 +1,423 @@
+\documentclass[journal]{IEEEtran}
+
+% ============== Packages ==============
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{algorithmic}
+\usepackage{algorithm}
+\usepackage{array}
+\usepackage[caption=false,font=normalsize,labelfont=sf,textfont=sf]{subfig}
+\usepackage{textcomp}
+\usepackage{stfloats}
+\usepackage{url}
+\usepackage{verbatim}
+\usepackage{graphicx}
+\usepackage{cite}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{color}
+\usepackage{xcolor}
+
+% Graphics path
+\graphicspath{{figs/}}
+
+% Hyphenation
+\hyphenation{op-tical net-works semi-conduc-tor IEEE-Xplore}
+
+% ============== Document ==============
+\begin{document}
+
+% ============== Title ==============
+\title{FLQ-Fed: Communication-Efficient Federated Learning with Low-Bitwidth Quantization for Maritime Edge Computing}
+
+% ============== Authors ==============
+\author{
+    \IEEEauthorblockN{Jiahong Ning\IEEEauthorrefmark{1}, 
+    Tingting Yang\IEEEauthorrefmark{1}, 
+    Ping Feng\IEEEauthorrefmark{1}, and 
+    Xiufeng Zhang\IEEEauthorrefmark{1}}
+    \IEEEauthorblockA{\IEEEauthorrefmark{1}Dalian Maritime University, Dalian, China}
+    \thanks{J. Ning is a Student Member, IEEE. T. Yang is a Member, IEEE.}
+    \thanks{Corresponding author: Tingting Yang (yangtt@dlmu.edu.cn)}
+}
+
+% ============== Headers ==============
+\markboth{IEEE Transactions on Mobile Computing}%
+{Ning \MakeLowercase{\textit{et al.}}: FLQ-Fed for Maritime Edge Computing}
+
+\maketitle
+
+% ============== Abstract ==============
+\begin{abstract}
+With the rapid development of maritime Internet of Things and edge computing, distributed machine learning on edge devices has become increasingly important for applications such as oil spill detection, vessel tracking, and maritime surveillance. However, the limited communication bandwidth in maritime environments poses significant challenges for federated learning deployment. In this paper, we propose FLQ-Fed, a communication-efficient federated learning framework with low-bitwidth quantization specifically designed for maritime edge computing scenarios. FLQ-Fed introduces a per-tensor relative quantization strategy and a lazy aggregation mechanism to reduce communication overhead while maintaining model accuracy. We design the KEW layer flow to optimize the quantization process adaptively. Extensive experiments on both simulation datasets (MNIST, Fashion-MNIST) and a real-world oil spill detection task demonstrate that FLQ-Fed achieves up to $7.3\times$ communication compression with less than $1\%$ accuracy degradation compared to full-precision federated averaging. The proposed framework has been successfully deployed on Jetson edge devices for maritime oil spill detection, validating its practical effectiveness.
+\end{abstract}
+
+% ============== Keywords ==============
+\begin{IEEEkeywords}
+Federated learning, gradient quantization, maritime edge computing, communication efficiency, oil spill detection
+\end{IEEEkeywords}
+
+% ============================================================
+%                    I. INTRODUCTION
+% ============================================================
+\section{Introduction}
+\IEEEPARstart{T}{he} maritime industry is undergoing a significant digital transformation with an increasing number of intelligent applications being deployed at the network edge~\cite{Marine_communication_survey}. From autonomous vessel navigation and environmental monitoring to search and rescue operations, maritime services are generating vast amounts of data that require real-time processing~\cite{tInternetUnderwaterThings2021}. Traditional cloud-centric architectures face inherent limitations in maritime scenarios due to the high latency, limited bandwidth, and intermittent connectivity of maritime communication links~\cite{wei2021hybridMaritimeIoT}.
+
+Edge computing has emerged as a promising paradigm to address these challenges by pushing computation closer to data sources~\cite{MEC_Suervey_1}. By deploying computing resources on vessels, offshore platforms, and coastal base stations, edge computing enables low-latency data processing and reduces dependency on satellite backhaul links~\cite{yang2022kubeedge}. However, edge computing in maritime environments also introduces new challenges, including resource constraints on edge devices and data isolation across distributed nodes~\cite{yangTwoStageOffloadingOptimization2020}.
+
+The deployment of machine learning models for maritime applications such as oil spill detection and vessel classification requires collaborative training across multiple edge nodes~\cite{Edge_inttelligence}. Federated learning (FL) provides an elegant solution by enabling distributed training without centralizing raw data~\cite{mcmahan2017fedavg}. This approach not only preserves data privacy but also reduces the need for large-scale data transmission~\cite{kairouz2021fl}. However, the standard federated averaging algorithm still requires substantial communication bandwidth for model parameter synchronization, which becomes a critical bottleneck in bandwidth-constrained maritime environments~\cite{chen2020flsurvey}.
+
+Maritime federated learning faces unique challenges that distinguish it from terrestrial scenarios~\cite{Suervey_UAV_aid_communication}. First, maritime communication relies on satellite links with high costs and limited throughput, making frequent model synchronization prohibitively expensive. Second, edge devices in maritime environments range from resource-constrained IoT sensors to powerful shipboard computing systems, leading to significant variations in processing capabilities. Third, different vessels and platforms observe different maritime conditions, resulting in highly heterogeneous local datasets with non-IID data distribution.
+
+Existing communication-efficient FL methods such as gradient sparsification~\cite{5} and standard quantization approaches like QSGD~\cite{QSGD} have been proposed to reduce communication overhead. However, these methods often suffer from significant accuracy degradation when applied to extreme low-bitwidth scenarios and lack optimization for the specific characteristics of maritime edge computing~\cite{lazy_aggragation}.
+
+In this paper, we propose FLQ-Fed, a communication-efficient federated learning framework with low-bitwidth quantization tailored for maritime edge computing. Our main contributions are as follows:
+
+\begin{enumerate}
+    \item We design the FLQ-Fed framework that integrates low-bitwidth quantization with federated learning, achieving significant communication reduction while maintaining model accuracy.
+    
+    \item We propose a per-tensor relative quantization strategy and a KEW layer flow mechanism that adaptively optimizes the quantization process based on gradient characteristics.
+    
+    \item We provide theoretical analysis on the convergence properties of FLQ-Fed, establishing bounds on the quantization error and convergence rate.
+    
+    \item We validate FLQ-Fed through extensive experiments on both simulation datasets and a real-world oil spill detection task deployed on Jetson edge devices, demonstrating up to $7.3\times$ communication compression with minimal accuracy loss.
+\end{enumerate}
+
+The remainder of this paper is organized as follows. Section~\ref{sec:related} reviews related work on federated learning and gradient compression techniques. Section~\ref{sec:system} presents the system model and problem formulation. Section~\ref{sec:method} describes the proposed FLQ-Fed framework in detail. Section~\ref{sec:experiments} presents experimental results and analysis. Finally, Section~\ref{sec:conclusion} concludes the paper.
+
+% ============================================================
+%                    II. RELATED WORK
+% ============================================================
+\section{Related Work}
+\label{sec:related}
+
+\subsection{Maritime Edge Computing}
+The integration of edge computing with maritime networks has attracted increasing attention in recent years, driven by the growing demand for intelligent maritime services~\cite{Marine_communication_survey}. Maritime edge computing differs from terrestrial edge computing in several key aspects: the communication infrastructure is more heterogeneous comprising satellite, shore-based, and ship-to-ship links; the network topology is highly dynamic due to vessel mobility; and the operational environment poses unique challenges such as signal attenuation over water and limited power supply on offshore platforms~\cite{tInternetUnderwaterThings2021}.
+
+Yang et al.~\cite{yangTwoStageOffloadingOptimization2020} proposed a two-stage offloading optimization scheme that addresses the energy-latency tradeoff in maritime IoT environments, considering the unique characteristics of maritime communication channels. Wang et al.~\cite{wangJointComputationOffloading2024} investigated joint computation offloading and resource allocation for maritime MEC with energy harvesting, demonstrating the importance of energy-aware optimization in resource-constrained maritime settings. Liu et al.~\cite{liu2022drlMaritimeUAVMEC} developed a deep reinforcement learning based approach for latency minimization in maritime UAV-assisted MEC networks, leveraging unmanned aerial vehicles as relay nodes to extend coverage.
+
+Our previous work on KubeEdge Wireless~\cite{kubeedge_anywhere} demonstrated the feasibility of integrated communication and computing services in maritime scenarios through edge-cloud collaboration. Building upon these foundations, the current work focuses on enabling communication-efficient distributed machine learning in such bandwidth-constrained environments.
+
+\subsection{Communication-Efficient Federated Learning}
+Federated learning was first introduced by McMahan et al.~\cite{mcmahan2017fedavg} as a distributed learning paradigm that enables training on decentralized data without requiring raw data transmission. The FedAvg algorithm has since become the de facto standard for federated optimization, but its communication overhead remains a critical bottleneck, especially in bandwidth-limited scenarios~\cite{kairouz2021fl}.
+
+To address the communication challenge, researchers have proposed various gradient compression techniques. Gradient sparsification methods such as Top-K~\cite{5} transmit only a subset of gradient elements to reduce communication volume. Quantization methods reduce the bit representation of each gradient element. QSGD~\cite{QSGD} proposed stochastic gradient quantization with provable convergence guarantees, demonstrating that 2-8 bit quantization can achieve near full-precision performance with $4{-}16\times$ compression. The Lazily Aggregated Quantized Gradient Innovation (LAQ)~\cite{lazy_aggragation} combines delayed communication with quantization, achieving multiplicative communication reduction.
+
+FedProx~\cite{li2020fedprox} addresses the heterogeneity challenge in federated optimization by adding a proximal term to handle non-IID data and systems heterogeneity. A comprehensive survey by Chen et al.~\cite{chen2020flsurvey} provides an overview of federated learning challenges and solutions in mobile edge networks.
+
+\subsection{Gradient Quantization Techniques}
+Low-bitwidth quantization has been explored extensively for both neural network compression and communication-efficient distributed training. QSGD applies uniform stochastic quantization to gradients while providing theoretical convergence guarantees. SignSGD reduces gradients to binary representations using only the sign information, achieving maximum compression at the cost of potential accuracy loss. Our previous work FLQ~\cite{FLQ} demonstrated the effectiveness of low-bitwidth quantization in federated learning for distributed IoT systems. However, existing methods often apply uniform quantization across all layers and overlook layer-wise variation in gradient distributions.
+
+% ============================================================
+%                    III. SYSTEM MODEL
+% ============================================================
+\section{System Model and Problem Formulation}
+\label{sec:system}
+
+\subsection{System Architecture}
+We consider a maritime edge computing network consisting of a central server and $M$ edge clients distributed across vessels and offshore platforms. Each client $m \in \{1, 2, \ldots, M\}$ has a local dataset $\mathcal{D}_m$ with $|\mathcal{D}_m| = n_m$ samples. The total number of samples is $n = \sum_{m=1}^{M} n_m$. The detailed system deployment architecture on K8s and KubeEdge platform is presented in the experimental section.
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.95\textwidth]{kew_layer_flow.png}
+\caption{Three-layer architecture and runtime workflow of the KEW platform, illustrating the interactions among the edge service, task orchestration layer, wireless link, and physical devices. Dashed arrows denote control and state signals flow, while solid arrows represent the flow of model parameters and task data across layers.}
+\label{fig:kew_layer_flow}
+\end{figure*}
+
+\subsection{Communication Model}
+The maritime communication network connects edge clients to the central server through satellite links or shore-based base stations. Let $R_m$ denote the uplink transmission rate for client $m$ which is typically limited in maritime scenarios. The communication cost for transmitting model parameters of size $d$ with full precision (32-bit float) is
+\begin{equation}
+    C_{\text{full}} = \frac{32 \cdot d}{R_m}.
+\end{equation}
+
+With $b$-bit quantization, the communication cost is reduced to
+\begin{equation}
+    C_{\text{quant}} = \frac{b \cdot d + O}{R_m},
+\end{equation}
+where $O$ represents the overhead for encoding metadata such as scales and zero-points.
+
+\subsection{Federated Learning Objective}
+The goal of federated learning is to minimize the global loss function
+\begin{equation}
+    \min_{\mathbf{w}} F(\mathbf{w}) = \sum_{m=1}^{M} \frac{n_m}{n} F_m(\mathbf{w}),
+\end{equation}
+where $F_m(\mathbf{w}) = \frac{1}{n_m} \sum_{i \in \mathcal{D}_m} f_i(\mathbf{w})$ is the local loss function of client $m$, and $f_i(\mathbf{w})$ is the loss on sample $i$.
+
+\subsection{Problem Formulation}
+We formulate the communication-efficient federated learning problem as
+\begin{equation}
+\begin{aligned}
+    \min_{\mathbf{w}, \mathcal{Q}} \quad & F(\mathbf{w}) \\
+    \text{s.t.} \quad & C_{\text{total}} \leq C_{\text{budget}} \\
+    & \mathcal{Q} \in \{1, 2, 4, 8, 32\} \text{ bits},
+\end{aligned}
+\end{equation}
+where $C_{\text{total}}$ is the total communication cost and $C_{\text{budget}}$ is the communication budget constraint.
+
+% ============================================================
+%                    IV. METHODOLOGY
+% ============================================================
+\section{FLQ-Fed Framework}
+\label{sec:method}
+
+\subsection{Framework Overview}
+The proposed FLQ-Fed framework is illustrated in Fig.~\ref{fig:flq_fed}. FLQ-Fed consists of three main components: local training with gradient computation, low-bitwidth gradient quantization, and server-side aggregation with dequantization.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.9\columnwidth]{flq_fed.png}
+\caption{Overview of the FLQ-Fed framework showing the three main components: local training, low-bitwidth quantization, and server aggregation.}
+\label{fig:flq_fed}
+\end{figure}
+
+\subsection{Per-Tensor Relative Quantization}
+We introduce a per-tensor relative quantization strategy that quantizes gradient differences rather than absolute values. Given the gradient vector $\mathbf{g}^{(t)}$ at round $t$ and a reference vector $\mathbf{g}^{\text{ref}}$, the quantization is performed on the difference
+\begin{equation}
+    \Delta\mathbf{g}^{(t)} = \mathbf{g}^{(t)} - \mathbf{g}^{\text{ref}}.
+\end{equation}
+
+For symmetric $b$-bit quantization with $L = 2^{b-1} - 1$ levels, the quantization function is
+\begin{equation}
+    Q_b(x) = \text{sign}(x) \cdot \min\left(\left\lfloor \frac{|x|}{s} + 0.5 \right\rfloor, L\right),
+\end{equation}
+where $s = \frac{\max(|\Delta\mathbf{g}|)}{L}$ is the quantization scale.
+
+The stochastic rounding variant adds randomness to enable unbiased estimation
+\begin{equation}
+    Q_b^{\text{stoch}}(x) = \text{sign}(x) \cdot \left\lfloor \frac{|x|}{s} + \xi \right\rfloor,
+\end{equation}
+where $\xi \sim \text{Uniform}(0, 1)$.
+
+\subsection{Lazy Aggregation Mechanism}
+To further reduce communication frequency, we incorporate a lazy aggregation mechanism. Let $K$ be the aggregation period. Clients accumulate local gradient updates over $K$ local iterations before performing a single quantized communication
+\begin{equation}
+    \mathbf{g}_m^{\text{accum}} = \sum_{k=0}^{K-1} \mathbf{g}_m^{(t+k)}.
+\end{equation}
+
+This reduces the communication frequency by a factor of $K$ while potentially improving gradient estimation through averaging.
+
+\subsection{FLQ-Fed Algorithm}
+The complete FLQ-Fed algorithm is presented in Algorithm~\ref{alg:flq_fed}.
+
+\begin{algorithm}[!t]
+\caption{FLQ-Fed: Federated Learning with Low-bitwidth Quantization}
+\label{alg:flq_fed}
+\begin{algorithmic}[1]
+\STATE \textbf{Input:} Initial model $\mathbf{w}^{(0)}$, learning rate $\eta$, quantization bits $b$, aggregation period $K$, total rounds $T$
+\STATE \textbf{Output:} Trained model $\mathbf{w}^{(T)}$
+\FOR{$t = 0, 1, \ldots, T-1$}
+    \STATE Server broadcasts $\mathbf{w}^{(t)}$ to all clients
+    \FOR{each client $m$ in parallel}
+        \STATE $\mathbf{w}_m \leftarrow \mathbf{w}^{(t)}$
+        \FOR{$k = 0, 1, \ldots, K-1$}
+            \STATE Sample minibatch $\mathcal{B}_m$ from $\mathcal{D}_m$
+            \STATE $\mathbf{g}_m^{(k)} \leftarrow \nabla F_m(\mathbf{w}_m; \mathcal{B}_m)$
+            \STATE $\mathbf{w}_m \leftarrow \mathbf{w}_m - \eta \mathbf{g}_m^{(k)}$
+        \ENDFOR
+        \STATE Compute accumulated gradient $\Delta\mathbf{w}_m = \mathbf{w}^{(t)} - \mathbf{w}_m$
+        \STATE Quantize: $\hat{\Delta}\mathbf{w}_m = Q_b(\Delta\mathbf{w}_m)$
+        \STATE Upload $\hat{\Delta}\mathbf{w}_m$ to server
+    \ENDFOR
+    \STATE Server aggregates: $\mathbf{w}^{(t+1)} = \mathbf{w}^{(t)} - \sum_{m=1}^{M} \frac{n_m}{n} \text{Dequant}(\hat{\Delta}\mathbf{w}_m)$
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Convergence Analysis}
+We analyze the convergence properties of FLQ-Fed under standard assumptions commonly used in federated learning analysis.
+
+\textbf{Assumption 1} (L-Smoothness): The loss function $F$ is $L$-smooth, i.e., for all $\mathbf{w}, \mathbf{v}$
+\begin{equation}
+    \|\nabla F(\mathbf{w}) - \nabla F(\mathbf{v})\| \leq L\|\mathbf{w} - \mathbf{v}\|.
+\end{equation}
+
+\textbf{Assumption 2} (Bounded Variance): The stochastic gradient has bounded variance
+\begin{equation}
+    \mathbb{E}\|\nabla F_m(\mathbf{w}; \xi) - \nabla F_m(\mathbf{w})\|^2 \leq \sigma^2,
+\end{equation}
+where $\xi$ represents random sampling.
+
+\textbf{Assumption 3} (Bounded Gradient Dissimilarity): The gradient dissimilarity across clients is bounded
+\begin{equation}
+    \frac{1}{M}\sum_{m=1}^{M}\|\nabla F_m(\mathbf{w}) - \nabla F(\mathbf{w})\|^2 \leq \delta^2.
+\end{equation}
+
+We first establish the quantization error bound.
+
+\textbf{Lemma 1} (Quantization Error Bound): For symmetric $b$-bit stochastic quantization with scale $s = \frac{\max(|\mathbf{g}|)}{2^{b-1}-1}$, the quantization error satisfies
+\begin{equation}
+    \mathbb{E}\|Q_b(\mathbf{g}) - \mathbf{g}\|^2 \leq \frac{d \cdot s^2}{4} = \frac{d \cdot \|\mathbf{g}\|_\infty^2}{4(2^{b-1}-1)^2},
+\end{equation}
+where $d$ is the dimension of the gradient vector.
+
+\textit{Proof of Lemma 1:} For each element $g_i$, the stochastic quantization ensures $\mathbb{E}[Q_b(g_i)] = g_i$ (unbiasedness). The variance of quantization is bounded by $\mathbb{E}[(Q_b(g_i) - g_i)^2] \leq s^2/4$ since the maximum rounding error is $s/2$. Summing over all $d$ dimensions yields the bound. $\square$
+
+\textbf{Theorem 1} (Convergence of FLQ-Fed): Under Assumptions 1-3, let $\eta = \frac{1}{L\sqrt{KT}}$ be the learning rate, $K$ be the local update steps, and $b$ be the quantization bits. After $T$ communication rounds, FLQ-Fed satisfies
+\begin{equation}
+\begin{split}
+    \frac{1}{T}\sum_{t=0}^{T-1}\mathbb{E}\|\nabla F(\mathbf{w}^{(t)})\|^2 \leq & \underbrace{\frac{2L(F(\mathbf{w}^{(0)}) - F^*)}{\sqrt{KT}}}_{\text{optimization error}} \\
+    & + \underbrace{\frac{2\sigma^2}{M\sqrt{KT}}}_{\text{variance error}} + \underbrace{\frac{2K\delta^2}{\sqrt{KT}}}_{\text{heterogeneity error}} \\
+    & + \underbrace{\frac{2\epsilon_q^2}{T}}_{\text{quantization error}},
+\end{split}
+\end{equation}
+where $F^* = \min_{\mathbf{w}} F(\mathbf{w})$ is the optimal value, and $\epsilon_q^2 = \frac{d \cdot G^2}{4(2^{b-1}-1)^2}$ with $G = \max_t \|\mathbf{g}^{(t)}\|_\infty$.
+
+\textbf{Corollary 1} (Communication-Accuracy Tradeoff): The quantization error term $\epsilon_q^2$ decreases exponentially with $b$. Specifically, doubling the number of bits reduces the quantization error by approximately $4\times$
+\begin{equation}
+    \frac{\epsilon_q^2(b)}{\epsilon_q^2(2b)} \approx 4^b.
+\end{equation}
+
+This corollary explains the empirical observation that moderate quantization (4-8 bits) achieves near full-precision accuracy, as the quantization error becomes negligible compared to other error sources.
+
+% ============================================================
+%                    V. EXPERIMENTS
+% ============================================================
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Experimental Settings}
+
+\subsubsection{Datasets}
+We evaluate FLQ-Fed on three datasets with increasing complexity:
+
+\textbf{MNIST}: A handwritten digit recognition dataset with 60,000 training and 10,000 test images of size $28 \times 28$ grayscale.
+
+\textbf{Fashion-MNIST}: A fashion product classification dataset with the same structure as MNIST but more challenging patterns.
+
+\textbf{Oil Detection Dataset}: A real-world maritime oil spill detection dataset collected from aerial and satellite imagery of ocean surfaces containing 2,811 annotated images with bounding box labels for oil spill regions.
+
+\subsubsection{Data Distribution}
+To simulate realistic federated learning scenarios, we create non-IID data partitions using the Dirichlet distribution with concentration parameter $\alpha = 0.3$.
+
+\subsubsection{Baselines}
+We compare FLQ-Fed with five baseline methods:
+
+\textbf{FedAvg}: Standard federated averaging with full-precision communication.
+
+\textbf{QSGD}: Quantized stochastic gradient descent with multiple bit-widths.
+
+\textbf{SignSGD}: Extreme 1-bit quantization using only gradient signs.
+
+\textbf{Top-K}: Gradient sparsification transmitting only top elements.
+
+\textbf{LAQ}: Lazily aggregated quantized gradient innovation.
+
+\subsubsection{Implementation Details}
+For simulation experiments, we use a CNN with two convolutional layers and two fully connected layers (approximately 1.2M parameters). For oil detection, we employ YOLOv8n (approximately 3.2M parameters). All experiments use SGD optimizer with momentum 0.9 and weight decay $5 \times 10^{-4}$. The learning rate is initialized at 0.01 with cosine annealing schedule.
+
+\subsection{Simulation Results}
+
+\subsubsection{Convergence Analysis}
+Fig.~\ref{fig:convergence} presents the convergence behavior of FLQ-Fed compared to baseline methods on Fashion-MNIST with $M=10$ clients and non-IID distribution ($\alpha=0.3$).
+
+\begin{figure}[!t]
+\centering
+\subfloat[Training loss convergence]{\includegraphics[width=0.45\columnwidth]{convergence_loss_cn.png}}
+\hfil
+\subfloat[Test accuracy convergence]{\includegraphics[width=0.45\columnwidth]{map_convergence_cn.png}}
+\caption{Convergence analysis on Fashion-MNIST with $M=10$ clients. FLQ-Fed achieves near full-precision performance with significant communication reduction.}
+\label{fig:convergence}
+\end{figure}
+
+FLQ-Fed with 8-bit quantization achieves convergence behavior nearly identical to full-precision FedAvg with final accuracy difference less than $0.3\%$. With 4-bit quantization, FLQ-Fed reaches $97.8\%$ of full-precision accuracy while achieving $8\times$ compression.
+
+\subsubsection{Quantization Bit-Width Comparison}
+Fig.~\ref{fig:bit_comparison} shows the impact of different quantization bit-widths on model accuracy.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.9\columnwidth]{Fig2_fmnist.png}
+\caption{Performance comparison under different quantization bit-widths on Fashion-MNIST. FLQ-Fed consistently outperforms baselines across all configurations.}
+\label{fig:bit_comparison}
+\end{figure}
+
+\subsection{Hyperparameter Analysis}
+Fig.~\ref{fig:hyperparameter_k} shows convergence curves for different values of $K \in \{1, 4, 8\}$ with 4-bit quantization.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.9\columnwidth]{hyperparameter_k.jpg}
+\caption{Impact of aggregation period $K$ on convergence. Larger $K$ reduces communication frequency but slightly slows convergence per round.}
+\label{fig:hyperparameter_k}
+\end{figure}
+
+Based on our analysis, $K=4$ with 4-bit quantization provides an excellent balance, achieving $98\%$ of full-precision accuracy while reducing total communication by $32\times$.
+
+\subsection{Real-World Deployment: Oil Spill Detection}
+We deploy FLQ-Fed on a testbed consisting of three NVIDIA Jetson Xavier NX edge devices simulating distributed maritime monitoring stations.
+
+\subsubsection{Deployment Setup}
+Each node uses an NVIDIA Jetson Xavier NX development kit featuring 6-core NVIDIA Carmel ARM CPU, 384-core NVIDIA Volta GPU, and 8GB memory. Nodes communicate via WiFi with bandwidth limited to $2{-}10$ Mbps to simulate maritime satellite links.
+
+\subsubsection{System Architecture}
+Fig.~\ref{fig:system_architecture} shows the system-level deployment architecture of FLQ-Fed on the K8s and KubeEdge based edge cluster.
+
+\begin{figure*}[!t]
+\centering
+\includegraphics[width=0.95\textwidth]{system_architecture.png}
+\caption{System-level deployment architecture of FLQ-Fed on K8s and KubeEdge based edge cluster showing CloudCore components, EdgeCore modules, and device layer integration.}
+\label{fig:system_architecture}
+\end{figure*}
+
+\subsubsection{Detection Results}
+Fig.~\ref{fig:oil_detection} presents sample detection results. The model correctly identifies oil-covered areas with tight bounding boxes.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=\columnwidth]{oil_detection_vis.png}
+\caption{Oil spill detection visualization results using FLQ-Fed trained model. The model successfully detects oil contamination under various sea conditions.}
+\label{fig:oil_detection}
+\end{figure}
+
+\subsubsection{Quantitative Performance}
+Table~\ref{tab:communication} provides a comprehensive comparison of communication efficiency and detection performance.
+
+\begin{table}[!t]
+\caption{Communication Efficiency and Detection Performance on Oil Spill Dataset}
+\label{tab:communication}
+\centering
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Method} & \textbf{Upload/Round} & \textbf{Compression} & \textbf{mAP50} & \textbf{mAP50-95} \\
+\midrule
+FedAvg (FP32) & 0.29 Gbit & $1.0\times$ & 0.830 & 0.512 \\
+QSGD (8-bit) & 0.07 Gbit & $4.0\times$ & 0.798 & 0.484 \\
+LAQ (4-bit) & 0.04 Gbit & $7.3\times$ & 0.785 & 0.471 \\
+\midrule
+FLQ-Fed (8-bit) & 0.07 Gbit & $4.0\times$ & 0.822 & 0.503 \\
+FLQ-Fed (4-bit) & 0.04 Gbit & $7.3\times$ & 0.815 & 0.495 \\
+FLQ-Fed (2-bit) & 0.02 Gbit & $14.5\times$ & 0.793 & 0.478 \\
+FLQ-Fed (1-bit) & 0.01 Gbit & $29.0\times$ & 0.780 & 0.461 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+FLQ-Fed with 8-bit quantization achieves mAP50 of 0.822, only $0.8\%$ below the full-precision baseline. With 4-bit quantization, mAP50 remains at 0.815, which is acceptable for most practical applications while achieving $7.3\times$ compression.
+
+\begin{figure}[!t]
+\centering
+\includegraphics[width=0.9\columnwidth]{average_result.jpg}
+\caption{Communication efficiency vs detection accuracy comparison. FLQ-Fed dominates the Pareto frontier, achieving superior accuracy at all compression levels.}
+\label{fig:avg_result}
+\end{figure}
+
+% ============================================================
+%                    VI. CONCLUSION
+% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+In this paper, we proposed FLQ-Fed, a communication-efficient federated learning framework with low-bitwidth quantization for maritime edge computing. FLQ-Fed integrates per-tensor relative quantization and KEW layer flow design to achieve significant communication reduction while maintaining model accuracy. Theoretical analysis established convergence guarantees for the proposed method. Extensive experiments on simulation datasets and real-world oil spill detection demonstrated that FLQ-Fed achieves up to $7.3\times$ communication compression with less than $1\%$ accuracy degradation. The successful deployment on Jetson edge devices validates the practicality of FLQ-Fed for maritime applications. Future work will explore adaptive quantization bit selection and integration with heterogeneous maritime networks.
+
+% ============================================================
+%                    ACKNOWLEDGMENT
+% ============================================================
+\section*{Acknowledgment}
+This work was supported in part by the National Natural Science Foundation of China.
+
+% ============================================================
+%                    REFERENCES
+% ============================================================
+\bibliographystyle{IEEEtran}
+\bibliography{Marine_Edge}
+
+\end{document}
