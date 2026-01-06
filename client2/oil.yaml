@@ -1,0 +1,7 @@
+names:
+  0: no-oil
+  1: oil
+nc: 2
+path: /home/njh/project/kew_federated_learning/client2/dataset
+train: train/images
+val: val/images

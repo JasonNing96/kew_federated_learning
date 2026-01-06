@@ -1,0 +1,2 @@
+aggregation_mode,avg_loss,avg_map50,bits_down_total_round,bits_up_total_round,buffered_updates,clients_per_round,current_round,round_time,timestamp,total_rounds,training_done,waiting_for
+fedavg,,,,,0,6,0,0.0,1763372576.4821844,5,False,6
